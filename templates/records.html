@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}{{ 'Clients' if kind == 'client' else 'Prospects' }}{% endblock %}
+{% block content %}
+<div class="bar">
+  <div class="grow"><h1>{{ 'Clients' if kind == 'client' else 'Prospects' }}</h1>
+    <p class="sub" style="margin:0">{{ total }} record(s)</p></div>
+  <a class="btn" href="{{ url_for('record_new', type=kind) }}">+ Add {{ kind }}</a>
+</div>
+<div class="tabs">
+  <a href="{{ url_for('records', type='prospect') }}" class="{{ 'on' if kind == 'prospect' }}">Prospects</a>
+  <a href="{{ url_for('records', type='client') }}" class="{{ 'on' if kind == 'client' }}">Clients</a>
+</div>
+<form class="bar" method="get">
+  <input type="hidden" name="type" value="{{ kind }}">
+  <input type="text" name="q" value="{{ q }}" placeholder="Search company, contact, e-mail, owner" style="max-width:340px">
+  {% if kind == 'prospect' %}
+  <select name="stage" style="max-width:180px">
+    <option value="">All stages</option><option value="open" {{ 'selected' if stage == 'open' }}>Open (not lost)</option>
+    {% for s in STAGES %}<option {{ 'selected' if stage == s }}>{{ s }}</option>{% endfor %}
+  </select>
+  {% endif %}
+  <button type="submit" class="alt">Filter</button>
+  {% if q or stage %}<a href="{{ url_for('records', type=kind) }}">Clear</a>{% endif %}
+</form>
+
+<div class="card" style="padding:0">
+{% if rows %}
+<div class="scroll"><table>
+  {% if kind == 'prospect' %}
+  <tr><th>Company</th><th>Contact</th><th>Stage</th><th class="c">Prob.</th><th>Expected close</th><th class="r">Value</th><th>Owner</th><th></th></tr>
+  {% for r in rows %}
+  <tr class="{{ 'overdue' if r.expected_close and r.expected_close < today and r.stage != 'Lost' }}">
+    <td><a href="{{ url_for('record_edit', rid=r.id) }}"><strong>{{ r.company }}</strong></a></td>
+    <td>{{ r.contact_name or '' }}{% if r.email %}<br><span class="muted">{{ r.email }}</span>{% endif %}</td>
+    <td><span class="pill {{ r.stage }}">{{ r.stage }}</span></td>
+    <td class="c">{{ r.probability }}%</td>
+    <td>{{ r.expected_close | fdate if r.expected_close else '–' }}</td>
+    <td class="r">{{ r.value | money if r.value is not none else '–' }}</td>
+    <td>{{ r.owner or '' }}</td>
+    <td style="white-space:nowrap">
+      <a class="btn alt sm" href="{{ url_for('record_edit', rid=r.id) }}">Edit</a>
+      <a class="btn alt sm" href="{{ url_for('record_edit', rid=r.id, convert=1) }}" title="Mark as converted client">Convert</a>
+      {% if g.user.role == 'admin' %}
+      <form class="inline" method="post" action="{{ url_for('record_delete', rid=r.id) }}" data-confirm="Delete {{ r.company }}? This cannot be undone.">
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}"><button class="danger sm" type="submit">Delete</button></form>
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+  {% else %}
+  <tr><th>Company</th><th>Contact</th><th>Closed date</th><th>Quarter</th><th class="r">Deal value</th><th>Owner</th><th></th></tr>
+  {% for r in rows %}
+  <tr>
+    <td><a href="{{ url_for('record_edit', rid=r.id) }}"><strong>{{ r.company }}</strong></a></td>
+    <td>{{ r.contact_name or '' }}{% if r.email %}<br><span class="muted">{{ r.email }}</span>{% endif %}</td>
+    <td>{{ r.closed_date | fdate if r.closed_date else '–' }}</td>
+    <td>{{ r.closed_quarter or '–' }}</td>
+    <td class="r">{{ r.value | money if r.value is not none else '–' }}</td>
+    <td>{{ r.owner or '' }}</td>
+    <td style="white-space:nowrap">
+      <a class="btn alt sm" href="{{ url_for('record_edit', rid=r.id) }}">Edit</a>
+      {% if g.user.role == 'admin' %}
+      <form class="inline" method="post" action="{{ url_for('record_delete', rid=r.id) }}" data-confirm="Delete {{ r.company }}? This cannot be undone.">
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}"><button class="danger sm" type="submit">Delete</button></form>
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+  {% endif %}
+</table></div>
+{% else %}<p class="empty">No {{ kind }}s found. <a href="{{ url_for('record_new', type=kind) }}">Add one</a> or <a href="{{ url_for('data_page') }}">import from Excel</a>.</p>{% endif %}
+</div>
+
+{% if pages > 1 %}
+<div class="pager">
+  {% if page > 1 %}<a href="{{ url_for('records', type=kind, q=q, stage=stage, page=page-1) }}">← Previous</a>{% endif %}
+  <span>Page {{ page }} of {{ pages }}</span>
+  {% if page < pages %}<a href="{{ url_for('records', type=kind, q=q, stage=stage, page=page+1) }}">Next →</a>{% endif %}
+</div>
+{% endif %}
+{% endblock %}

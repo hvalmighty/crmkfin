@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Settings{% endblock %}
+{% block content %}
+<h1>Settings</h1>
+<p class="sub">Admin only.</p>
+<form method="post" class="card" style="max-width:720px">
+  <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+  <h2>Weekly prospect reminder</h2>
+  <div class="form-grid">
+    <div class="span2"><label>Send reminders to (e-mail IDs, separated by commas)</label>
+      <input name="reminder_emails" type="text" value="{{ g.cfg.reminder_emails }}" placeholder="sales.head@company.com, you@company.com"></div>
+    <div><label>Day of week</label>
+      <select name="reminder_day">{% for d in DAYS %}<option value="{{ loop.index0 }}" {{ 'selected' if g.cfg.reminder_day == loop.index0 | string }}>{{ d }}</option>{% endfor %}</select></div>
+    <div><label>Send at (hour, {{ tz }})</label>
+      <select name="reminder_hour">{% for h in range(24) %}<option value="{{ h }}" {{ 'selected' if g.cfg.reminder_hour == h | string }}>{{ '%02d:00' % h }}</option>{% endfor %}</select></div>
+    <div class="span2 check"><input type="checkbox" id="en" name="reminder_enabled" value="1" {{ 'checked' if g.cfg.reminder_enabled == '1' }}>
+      <label for="en" style="margin:0;font-weight:500">Weekly reminder enabled</label></div>
+  </div>
+  <p class="hint">The e-mail lists every open prospect (stage, probability, expected closure, overdue flagged) with a funnel summary.<br>
+    Mail server: {% if smtp %}<span class="pill on">configured</span>{% else %}<span class="pill off">not configured</span> – set the SMTP_* environment variables (see README).{% endif %}
+    {% if g.cfg.reminder_status %}<br>Last run: {{ g.cfg.reminder_status }}{% endif %}</p>
+
+  <h2 style="margin-top:22px">General</h2>
+  <div class="form-grid">
+    <div><label>Company / app name</label><input name="company_name" type="text" maxlength="60" value="{{ g.cfg.company_name }}"></div>
+    <div><label>Currency symbol</label><input name="currency" type="text" maxlength="4" value="{{ g.cfg.currency }}"></div>
+    <div><label>Quarters start in</label>
+      <select name="fy_start_month">
+        {% for m in ['January (calendar year)','February','March','April (India FY)','May','June','July','August','September','October','November','December'] %}
+        <option value="{{ loop.index }}" {{ 'selected' if g.cfg.fy_start_month == loop.index | string }}>{{ m }}</option>{% endfor %}
+      </select><div class="hint">Changing this re-labels quarters of clients that have a closed date.</div></div>
+  </div>
+  <div class="bar" style="margin:18px 0 0">
+    <button type="submit" name="action" value="save">Save settings</button>
+  </div>
+</form>
+
+<form method="post" class="card" style="max-width:720px">
+  <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+  <h2>Test it</h2>
+  <p class="muted">Sends the reminder to the saved addresses right now (save any changes above first).</p>
+  <button type="submit" name="action" value="test" class="alt">Send reminder now</button>
+</form>
+{% endblock %}

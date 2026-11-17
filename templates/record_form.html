@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}{{ 'Add' if is_new else 'Edit' }} {{ kind }}{% endblock %}
+{% block content %}
+<h1>{% if is_new %}Add {{ kind }}{% elif converting %}Convert to client{% else %}Edit {{ kind }}{% endif %}</h1>
+<p class="sub">{% if converting %}Confirm the closure date and deal value, then save. The prospect becomes a client.{% else %}Fields marked * are required.{% endif %}</p>
+<form method="post" class="card">
+  <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+  <div class="form-grid">
+    <div><label for="type">Type *</label>
+      <select id="type" name="type">
+        <option value="prospect" {{ 'selected' if kind == 'prospect' }}>Prospect</option>
+        <option value="client" {{ 'selected' if kind == 'client' }}>Client (converted)</option>
+      </select></div>
+    <div><label for="company">Company *</label>
+      <input id="company" name="company" type="text" maxlength="200" value="{{ rec.company or '' }}" required></div>
+    <div><label for="contact_name">Contact name</label>
+      <input id="contact_name" name="contact_name" type="text" maxlength="120" value="{{ rec.contact_name or '' }}"></div>
+    <div><label for="email">E-mail</label>
+      <input id="email" name="email" type="email" maxlength="200" value="{{ rec.email or '' }}"></div>
+    <div><label for="phone">Phone</label>
+      <input id="phone" name="phone" type="text" maxlength="30" value="{{ rec.phone or '' }}"></div>
+    <div><label for="owner">Sales owner</label>
+      <input id="owner" name="owner" type="text" maxlength="80" value="{{ rec.owner or '' }}"></div>
+    <div><label for="source">Lead source</label>
+      <input id="source" name="source" type="text" maxlength="80" value="{{ rec.source or '' }}" placeholder="Referral, website, event…"></div>
+    <div><label for="value"><span data-only="prospect">Expected value</span><span data-only="client">Deal value</span></label>
+      <input id="value" name="value" type="text" inputmode="decimal" value="{{ rec.value if rec.value is not none else '' }}"></div>
+
+    <div data-only="prospect"><label for="stage">Stage *</label>
+      <select id="stage" name="stage" data-defaults='{{ DEFAULT_PROB | tojson }}'>
+        {% for s in STAGES %}<option {{ 'selected' if rec.stage == s }}>{{ s }}</option>{% endfor %}
+      </select></div>
+    <div data-only="prospect"><label for="probability">Probability of closure (%)</label>
+      <input id="probability" name="probability" type="number" min="0" max="100" value="{{ rec.probability if rec.probability is not none else '' }}"></div>
+    <div data-only="prospect"><label for="expected_close">Likely closure date</label>
+      <input id="expected_close" name="expected_close" type="date" value="{{ rec.expected_close or '' }}"></div>
+
+    <div data-only="client"><label for="closed_date">Closed date</label>
+      <input id="closed_date" name="closed_date" type="date" value="{{ rec.closed_date or '' }}">
+      <div class="hint">The quarter is worked out from this date.</div></div>
+    <div data-only="client"><label for="closed_quarter">…or closed quarter</label>
+      <input id="closed_quarter" name="closed_quarter" type="text" maxlength="30" value="{{ rec.closed_quarter or '' }}" placeholder="e.g. 2026-Q3">
+      <div class="hint">Use only if you don't know the exact date.</div></div>
+
+    <div class="span2"><label for="notes">Notes</label>
+      <textarea id="notes" name="notes" maxlength="2000">{{ rec.notes or '' }}</textarea></div>
+  </div>
+  <div class="bar" style="margin:18px 0 0">
+    <button type="submit">Save</button>
+    <a class="btn alt" href="{{ url_for('records', type=kind) }}">Cancel</a>
+  </div>
+</form>
+{% endblock %}

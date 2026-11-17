@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+<div class="bar">
+  <div class="grow"><h1>Dashboard</h1><p class="sub" style="margin:0">Sales funnel at a glance</p></div>
+  <a class="btn" href="{{ url_for('record_new', type='prospect') }}">+ Prospect</a>
+  <a class="btn alt" href="{{ url_for('record_new', type='client') }}">+ Client</a>
+</div>
+
+<div class="grid kpis">
+  <div class="kpi"><div class="n">{{ d.open_n }}</div><div class="l">Open prospects</div></div>
+  <div class="kpi"><div class="n">{{ d.pipeline | money }}</div><div class="l">Pipeline value</div></div>
+  <div class="kpi"><div class="n">{{ d.weighted | money }}</div><div class="l">Weighted forecast</div></div>
+  <div class="kpi"><div class="n">{{ d.clients }}</div><div class="l">Clients · {{ d.won_value | money }}</div></div>
+  <div class="kpi"><div class="n">{{ d.won_q.c }}</div><div class="l">Won in {{ d.cur_q }} · {{ d.won_q.v | money }}</div></div>
+  <div class="kpi"><div class="n">{{ (d.win_rate ~ '%') if d.win_rate is not none else '–' }}</div><div class="l">Win rate (clients ÷ clients + lost)</div></div>
+</div>
+
+<div class="card">
+  <h2>Sales funnel</h2>
+  {% include "_funnel.html" %}
+  <p class="muted" style="margin:10px 0 0;font-size:13px">{{ d.lost }} prospect(s) marked Lost.
+    "wtd" = value × probability.</p>
+</div>
+
+<div class="grid two">
+  <div class="card">
+    <h2>Overdue closures ({{ d.overdue | length }})</h2>
+    {% if d.overdue %}
+    <div class="scroll"><table>
+      <tr><th>Company</th><th>Stage</th><th>Was due</th><th class="r">Value</th></tr>
+      {% for r in d.overdue[:8] %}
+      <tr class="overdue"><td><a href="{{ url_for('record_edit', rid=r.id) }}">{{ r.company }}</a></td>
+        <td>{{ r.stage }}</td><td>{{ r.expected_close | fdate }}</td><td class="r">{{ r.value | money }}</td></tr>
+      {% endfor %}
+    </table></div>
+    {% if d.overdue | length > 8 %}<p class="muted">+ {{ d.overdue | length - 8 }} more in Prospects.</p>{% endif %}
+    {% else %}<p class="empty">Nothing overdue.</p>{% endif %}
+  </div>
+  <div class="card">
+    <h2>Closing in the next 30 days ({{ d.upcoming | length }})</h2>
+    {% if d.upcoming %}
+    <div class="scroll"><table>
+      <tr><th>Company</th><th>Stage</th><th>Expected</th><th class="c">Prob.</th><th class="r">Value</th></tr>
+      {% for r in d.upcoming[:8] %}
+      <tr><td><a href="{{ url_for('record_edit', rid=r.id) }}">{{ r.company }}</a></td><td>{{ r.stage }}</td>
+        <td>{{ r.expected_close | fdate }}</td><td class="c">{{ r.probability }}%</td><td class="r">{{ r.value | money }}</td></tr>
+      {% endfor %}
+    </table></div>
+    {% else %}<p class="empty">No closures expected in the next 30 days.</p>{% endif %}
+  </div>
+</div>
+{% if d.no_date %}<p class="muted">{{ d.no_date }} open prospect(s) have no expected closure date.
+  <a href="{{ url_for('records', type='prospect') }}">Review</a></p>{% endif %}
+{% endblock %}

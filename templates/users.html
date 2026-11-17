@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Users{% endblock %}
+{% block content %}
+<div class="bar"><div class="grow"><h1>Users</h1><p class="sub" style="margin:0">Only admins can add, disable or reset users.</p></div>
+  <a class="btn" href="{{ url_for('user_new') }}">+ Add user</a></div>
+<div class="card" style="padding:0"><div class="scroll"><table>
+  <tr><th>Login ID</th><th>E-mail</th><th>Role</th><th>Status</th><th>Last login (UTC)</th><th></th></tr>
+  {% for u in rows %}
+  <tr>
+    <td><strong>{{ u.username }}</strong></td>
+    <td>{{ u.email or '' }}</td>
+    <td><span class="pill {{ 'admin' if u.role == 'admin' }}">{{ u.role }}</span></td>
+    <td>{% if not u.active %}<span class="pill off">disabled</span>
+        {% elif u.locked_until and u.locked_until > now %}<span class="pill off">locked</span>
+        {% elif u.must_change %}<span class="pill">must change password</span>
+        {% else %}<span class="pill on">active</span>{% endif %}</td>
+    <td>{{ u.last_login or '–' }}</td>
+    <td><a class="btn alt sm" href="{{ url_for('user_edit', uid=u.id) }}">Manage</a></td>
+  </tr>
+  {% endfor %}
+</table></div></div>
+{% endblock %}

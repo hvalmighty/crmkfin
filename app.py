@@ -1,0 +1,1327 @@
+"""Simple CRM: prospects & clients, Excel import/export, funnel reports,
+weekly e-mail reminders, secure login with an admin who controls users/settings.
+
+Run (dev):   python app.py
+Run (prod):  gunicorn -c gunicorn.conf.py app:app
+"""
+import html as htmllib
+import io
+import logging
+import os
+import re
+import secrets
+import smtplib
+import sqlite3
+import sys
+import threading
+import time
+from datetime import date, datetime, timedelta, timezone
+from email.message import EmailMessage
+from functools import wraps
+from zoneinfo import ZoneInfo
+
+from flask import (Flask, abort, flash, g, redirect, render_template, request,
+                   send_file, session, url_for)
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.worksheet.datavalidation import DataValidation
+from werkzeug.security import check_password_hash, generate_password_hash
+
+log = logging.getLogger("crm")
+logging.basicConfig(level=logging.INFO)
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.environ.get("CRM_DATA_DIR") or os.path.join(BASE_DIR, "instance")
+os.makedirs(DATA_DIR, exist_ok=True)
+DB_PATH = os.path.join(DATA_DIR, "crm.db")
+TZ = ZoneInfo(os.environ.get("CRM_TIMEZONE", "Asia/Kolkata"))
+
+STAGES = ["Lead", "Qualified", "Proposal", "Negotiation", "Lost"]
+OPEN_STAGES = STAGES[:-1]
+DEFAULT_PROB = {"Lead": 10, "Qualified": 25, "Proposal": 50, "Negotiation": 75, "Lost": 0}
+STAGE_SYNONYMS = {
+    "new": "Lead", "cold": "Lead", "qualification": "Qualified", "qualify": "Qualified",
+    "proposal sent": "Proposal", "quote": "Qualified" if False else "Proposal",
+    "quotation": "Proposal", "negotiating": "Negotiation", "closed lost": "Lost",
+    "dropped": "Lost",
+}
+DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+PAGE_SIZE = 25
+MAX_LOCK_ATTEMPTS = 5
+LOCK_MINUTES = 15
+
+SETTING_DEFAULTS = {
+    "company_name": "My CRM",
+    "currency": "₹",
+    "fy_start_month": "1",           # 1 = calendar-year quarters, 4 = April-March FY
+    "reminder_enabled": "1",
+    "reminder_emails": "",
+    "reminder_day": "0",             # Monday
+    "reminder_hour": "9",
+    "reminder_last_attempt": "",
+    "reminder_last_sent": "",
+    "reminder_status": "",
+}
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    email TEXT,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('admin','user')),
+    active INTEGER NOT NULL DEFAULT 1,
+    must_change INTEGER NOT NULL DEFAULT 1,
+    pw_version INTEGER NOT NULL DEFAULT 0,
+    failed_attempts INTEGER NOT NULL DEFAULT 0,
+    locked_until TEXT,
+    created_at TEXT NOT NULL,
+    last_login TEXT
+);
+CREATE TABLE IF NOT EXISTS records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    type TEXT NOT NULL CHECK (type IN ('prospect','client')),
+    company TEXT NOT NULL,
+    contact_name TEXT, email TEXT, phone TEXT, owner TEXT, source TEXT,
+    stage TEXT, probability INTEGER, expected_close TEXT,
+    value REAL,
+    closed_date TEXT, closed_quarter TEXT,
+    notes TEXT,
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    created_by INTEGER, updated_by INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_records_type ON records(type);
+CREATE INDEX IF NOT EXISTS idx_records_company ON records(company COLLATE NOCASE);
+CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL, username TEXT, action TEXT NOT NULL, detail TEXT
+);
+"""
+
+
+# --------------------------------------------------------------------------- helpers
+def utcnow():
+    return datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
+
+
+def iso(dt):
+    return dt.isoformat(sep=" ")
+
+
+def load_secret_key():
+    key = os.environ.get("CRM_SECRET_KEY")
+    if key:
+        return key
+    path = os.path.join(DATA_DIR, "secret.key")
+    if not os.path.exists(path):
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(secrets.token_hex(32))
+        except FileExistsError:
+            pass
+    with open(path) as f:
+        return f.read().strip()
+
+
+def connect():
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+
+def get_settings(conn):
+    cfg = dict(SETTING_DEFAULTS)
+    for r in conn.execute("SELECT key, value FROM settings"):
+        cfg[r["key"]] = r["value"]
+    return cfg
+
+
+def set_setting(conn, key, value):
+    conn.execute("INSERT INTO settings(key,value) VALUES(?,?) "
+                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(value)))
+
+
+def audit(conn, username, action, detail=""):
+    conn.execute("INSERT INTO audit_log(ts,username,action,detail) VALUES(?,?,?,?)",
+                 (iso(utcnow()), username, action, detail[:500]))
+
+
+def password_problem(pw, username=""):
+    if len(pw) < 10:
+        return "Password must be at least 10 characters."
+    if not re.search(r"[A-Za-z]", pw) or not re.search(r"\d", pw):
+        return "Password must contain at least one letter and one number."
+    if username and pw.lower() == username.lower():
+        return "Password must not be the same as the username."
+    return None
+
+
+def init_db():
+    conn = connect()
+    conn.executescript(SCHEMA)
+    for k, v in SETTING_DEFAULTS.items():
+        conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (k, v))
+    if not conn.execute("SELECT 1 FROM users").fetchone():
+        username = os.environ.get("CRM_ADMIN_USER", "admin")
+        pw = os.environ.get("CRM_ADMIN_PASSWORD")
+        generated = pw is None
+        if generated:
+            pw = secrets.token_urlsafe(12)
+        conn.execute(
+            "INSERT INTO users(username,password_hash,role,must_change,created_at) VALUES(?,?,?,?,?)",
+            (username, generate_password_hash(pw), "admin", 1, iso(utcnow())))
+        audit(conn, "system", "admin_created", username)
+        banner = "=" * 62
+        print(f"\n{banner}\n  First run: admin account created\n  username: {username}\n"
+              f"  password: {pw if generated else '(from CRM_ADMIN_PASSWORD)'}\n"
+              f"  You must change the password at first login.\n{banner}\n",
+              file=sys.stderr, flush=True)
+    conn.commit()
+    conn.close()
+
+
+# --------------------------------------------------------------------------- dates / quarters
+DATE_FORMATS = ["%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%d.%m.%Y", "%d-%b-%Y", "%d %b %Y",
+                "%d %B %Y", "%d/%m/%y", "%d-%m-%y", "%b %d, %Y"]
+
+
+def parse_date(v):
+    if v in (None, ""):
+        return None
+    if isinstance(v, datetime):
+        return v.date()
+    if isinstance(v, date):
+        return v
+    s = str(v).strip()
+    if not s:
+        return None
+    s = s.split(" 00:00:00")[0]
+    for fmt in DATE_FORMATS:
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    raise ValueError(f"unrecognised date '{s}' (use DD-MM-YYYY)")
+
+
+def quarter_label(d, fy_start=1):
+    if fy_start == 1:
+        return f"{d.year}-Q{(d.month - 1) // 3 + 1}"
+    q = ((d.month - fy_start) % 12) // 3 + 1
+    fy_end = d.year + (1 if d.month >= fy_start else 0)
+    return f"FY{fy_end - 1}-{str(fy_end)[-2:]} Q{q}"
+
+
+def normalise_quarter_text(text, fy_start):
+    """Tidy hand-typed quarters like 'Q3 2026' -> '2026-Q3' (calendar mode only)."""
+    text = (text or "").strip()
+    if not text or fy_start != 1:
+        return text[:30] or None
+    m = re.fullmatch(r"(?i)q([1-4])\W*(\d{4})", text) or None
+    if m:
+        return f"{m.group(2)}-Q{m.group(1)}"
+    m = re.fullmatch(r"(?i)(\d{4})\W*q([1-4])", text)
+    if m:
+        return f"{m.group(1)}-Q{m.group(2)}"
+    return text[:30]
+
+
+# --------------------------------------------------------------------------- record parsing
+def clean_text(v, maxlen=500):
+    if v is None:
+        return None
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
+    s = str(v).strip()
+    return s[:maxlen] if s else None
+
+
+def parse_stage(v):
+    s = clean_text(v)
+    if not s:
+        return "Lead"
+    low = s.lower()
+    for st in STAGES:
+        if st.lower() == low:
+            return st
+    if low in STAGE_SYNONYMS:
+        return STAGE_SYNONYMS[low]
+    raise ValueError(f"unknown stage '{s}' (use {', '.join(STAGES)})")
+
+
+def parse_prob(v):
+    if v in (None, ""):
+        return None
+    if isinstance(v, str):
+        s = v.strip().rstrip("%").strip()
+        if not s:
+            return None
+        n = float(s)
+        pct = n
+    else:
+        n = float(v)
+        pct = n * 100 if 0 < n <= 1 else n   # Excel % cells arrive as 0.6
+    if not 0 <= pct <= 100:
+        raise ValueError("probability must be between 0 and 100")
+    return int(round(pct))
+
+
+def parse_money(v):
+    if v in (None, ""):
+        return None
+    if isinstance(v, str):
+        s = re.sub(r"[^\d.\-]", "", v)
+        if not s:
+            return None
+        v = s
+    n = float(v)
+    if n < 0:
+        raise ValueError("value cannot be negative")
+    return round(n, 2)
+
+
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def normalize(raw, kind, fy_start=1):
+    """Validate/clean one record. Returns (data, errors)."""
+    errors = []
+    d = {"type": kind}
+    d["company"] = clean_text(raw.get("company"), 200)
+    if not d["company"]:
+        errors.append("Company is required")
+    d["contact_name"] = clean_text(raw.get("contact_name"), 120)
+    d["owner"] = clean_text(raw.get("owner"), 80)
+    d["source"] = clean_text(raw.get("source"), 80)
+    d["notes"] = clean_text(raw.get("notes"), 2000)
+    email = clean_text(raw.get("email"), 200)
+    if email and not EMAIL_RE.match(email):
+        errors.append(f"invalid email '{email}'")
+        email = None
+    d["email"] = email.lower() if email else None
+    phone = clean_text(raw.get("phone"), 30)
+    if phone and len(re.findall(r"\d", phone)) < 5:
+        errors.append(f"invalid phone '{phone}'")
+        phone = None
+    d["phone"] = phone
+
+    def safe(fn, field, label):
+        try:
+            return fn(raw.get(field))
+        except (ValueError, TypeError) as e:
+            msg = str(e)
+            errors.append(f"{label}: {msg}" if not msg.startswith("could not") else f"{label}: not a number")
+            return None
+
+    d["value"] = safe(parse_money, "value", "Value")
+    if kind == "prospect":
+        d["stage"] = safe(parse_stage, "stage", "Stage") or "Lead"
+        prob = safe(parse_prob, "probability", "Probability")
+        d["probability"] = prob if prob is not None else DEFAULT_PROB[d["stage"]]
+        d["expected_close"] = safe(parse_date, "expected_close", "Expected close date")
+        d["closed_date"] = d["closed_quarter"] = None
+    else:
+        d["stage"] = d["probability"] = d["expected_close"] = None
+        cd = safe(parse_date, "closed_date", "Closed date")
+        d["closed_date"] = cd
+        if cd:
+            d["closed_quarter"] = quarter_label(cd, fy_start)
+        else:
+            d["closed_quarter"] = normalise_quarter_text(clean_text(raw.get("closed_quarter"), 30), fy_start)
+            if not d["closed_quarter"] and "Closed date" not in " ".join(errors):
+                errors.append("Closed date or closed quarter is required for a client")
+    for k in ("expected_close", "closed_date"):
+        if d.get(k):
+            d[k] = d[k].isoformat()
+    return d, errors
+
+
+COLS = ["type", "company", "contact_name", "email", "phone", "owner", "source", "stage",
+        "probability", "expected_close", "value", "closed_date", "closed_quarter", "notes"]
+
+
+def insert_record(conn, d, uid):
+    now = iso(utcnow())
+    cur = conn.execute(
+        f"INSERT INTO records ({','.join(COLS)},created_at,updated_at,created_by,updated_by) "
+        f"VALUES ({','.join('?' * len(COLS))},?,?,?,?)",
+        [d.get(c) for c in COLS] + [now, now, uid, uid])
+    return cur.lastrowid
+
+
+def update_record(conn, rid, d, uid):
+    sets = ",".join(f"{c}=?" for c in COLS)
+    conn.execute(f"UPDATE records SET {sets}, updated_at=?, updated_by=? WHERE id=?",
+                 [d.get(c) for c in COLS] + [iso(utcnow()), uid, rid])
+
+
+# --------------------------------------------------------------------------- Excel import/export
+HEADER_ALIASES = {
+    "company": ["company", "company name", "customer", "customer name", "client", "client name",
+                "organization", "organisation", "account", "account name", "name"],
+    "contact_name": ["contact", "contact name", "contact person", "person"],
+    "email": ["email", "email id", "e-mail", "email address", "mail id"],
+    "phone": ["phone", "mobile", "phone number", "mobile number", "contact number"],
+    "owner": ["owner", "sales owner", "account owner", "sales rep", "assigned to", "salesperson"],
+    "source": ["source", "lead source"],
+    "notes": ["notes", "remarks", "comments", "note"],
+    "value": ["value", "deal value", "expected value", "amount", "deal size", "revenue",
+              "order value", "deal amount"],
+    "type": ["type", "record type", "category"],
+}
+PROSPECT_ALIASES = {
+    "stage": ["stage", "pipeline stage", "status"],
+    "probability": ["probability", "probability (%)", "probability %", "prob", "prob %",
+                    "win probability", "chance"],
+    "expected_close": ["expected close date", "expected closure date", "likely closure date",
+                       "likely close date", "expected close", "closure date", "close date",
+                       "expected date", "target close date"],
+}
+CLIENT_ALIASES = {
+    "closed_date": ["closed date", "closure date", "close date", "date closed", "won date",
+                    "date of closure", "closing date", "converted date"],
+    "closed_quarter": ["closed quarter", "closure quarter", "quarter", "quarter of closure",
+                       "closing quarter"],
+}
+
+
+def norm_header(h):
+    return re.sub(r"\s+", " ", re.sub(r"[*:]", " ", str(h or ""))).strip().lower()
+
+
+def map_headers(header, kind):
+    aliases = dict(HEADER_ALIASES)
+    if kind == "prospect":
+        aliases.update(PROSPECT_ALIASES)
+    elif kind == "client":
+        aliases.update(CLIENT_ALIASES)
+    else:  # mixed sheet: unambiguous aliases only
+        aliases["stage"] = ["stage", "pipeline stage"]
+        aliases["probability"] = PROSPECT_ALIASES["probability"]
+        aliases["expected_close"] = ["expected close date", "expected closure date",
+                                     "likely closure date", "likely close date", "expected close"]
+        aliases["closed_date"] = ["closed date", "date closed", "won date", "date of closure",
+                                  "closing date", "converted date"]
+        aliases["closed_quarter"] = CLIENT_ALIASES["closed_quarter"]
+    lookup = {}
+    for field, names in aliases.items():
+        for n in names:
+            lookup.setdefault(n, field)
+    colmap, seen = {}, set()
+    for i, h in enumerate(header):
+        field = lookup.get(norm_header(h))
+        if field and field not in seen:
+            colmap[i] = field
+            seen.add(field)
+    return colmap
+
+
+def row_kind(v):
+    s = (clean_text(v) or "").lower()
+    if s in ("prospect", "prospects", "lead", "leads"):
+        return "prospect"
+    if s in ("client", "clients", "customer", "customers", "converted", "won"):
+        return "client"
+    return None
+
+
+def import_workbook(conn, fileobj, fy_start, update_existing, dry_run, uid):
+    wb = load_workbook(fileobj, read_only=True, data_only=True)
+    res = {"created": 0, "updated": 0, "skipped": 0, "errors": [], "sheets": []}
+    for ws in wb.worksheets:
+        name, low = ws.title, ws.title.lower()
+        if low in ("instructions", "readme", "help", "notes"):
+            continue
+        kind = ("client" if ("client" in low or "customer" in low)
+                else "prospect" if any(k in low for k in ("prospect", "lead", "pipeline")) else None)
+        colmap, header_seen, stats = None, False, {"sheet": name, "rows": 0, "ok": 0}
+        for idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
+            if row is None or all(c in (None, "") for c in row):
+                continue
+            if not header_seen:
+                header_seen = True
+                colmap = map_headers(row, kind)
+                fields = set(colmap.values())
+                if "company" not in fields:
+                    res["errors"].append((name, idx, "No 'Company' column found - sheet skipped"))
+                    break
+                if kind is None and "type" not in fields:
+                    res["errors"].append((name, idx, "Sheet name should contain 'Prospects' or "
+                                                     "'Clients', or add a 'Type' column - sheet skipped"))
+                    break
+                continue
+            if stats["rows"] >= 20000:
+                res["errors"].append((name, idx, "Row limit (20,000) reached - remaining rows ignored"))
+                break
+            stats["rows"] += 1
+            raw = {colmap[i]: row[i] for i in colmap if i < len(row)}
+            k = kind or row_kind(raw.get("type"))
+            if not k:
+                res["errors"].append((name, idx, "Type must be Prospect or Client"))
+                continue
+            d, errs = normalize(raw, k, fy_start)
+            if errs:
+                res["errors"].append((name, idx, "; ".join(errs)))
+                continue
+            existing = conn.execute(
+                "SELECT id FROM records WHERE type=? AND lower(company)=lower(?) "
+                "AND lower(COALESCE(email,''))=lower(?)", (k, d["company"], d["email"] or "")).fetchone()
+            if existing:
+                if update_existing:
+                    update_record(conn, existing["id"], d, uid)
+                    res["updated"] += 1
+                else:
+                    res["skipped"] += 1
+                    continue
+            else:
+                insert_record(conn, d, uid)
+                res["created"] += 1
+            stats["ok"] += 1
+        res["sheets"].append(stats)
+    wb.close()
+    return res
+
+
+def xl_safe(v):
+    """Neutralise spreadsheet formula injection on export."""
+    if isinstance(v, str) and v[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + v
+    return v
+
+
+HEAD_FILL = PatternFill("solid", fgColor="1F3A5F")
+HEAD_FONT = Font(bold=True, color="FFFFFF")
+
+
+def style_header(ws, widths):
+    for c in ws[1]:
+        c.fill, c.font = HEAD_FILL, HEAD_FONT
+        c.alignment = Alignment(vertical="center", wrap_text=True)
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
+    ws.freeze_panes = "B2"
+
+
+PROSPECT_HEADERS = ["Company*", "Contact Name", "Email", "Phone", "Owner", "Source", "Stage",
+                    "Probability (%)", "Expected Close Date", "Expected Value", "Notes"]
+CLIENT_HEADERS = ["Company*", "Contact Name", "Email", "Phone", "Owner", "Source",
+                  "Closed Date", "Closed Quarter", "Deal Value", "Notes"]
+
+
+def build_template():
+    wb = Workbook()
+    info = wb.active
+    info.title = "Instructions"
+    lines = [
+        "CRM import template",
+        "",
+        "Fill the 'Prospects' sheet for open opportunities and the 'Clients' sheet for converted customers.",
+        "Keep the header row. Columns marked * are required. Delete nothing but the data rows you do not need.",
+        "",
+        f"Prospects - Stage must be one of: {', '.join(STAGES)} (blank = Lead).",
+        "Prospects - Probability is 0-100 (60 or 60% both work). Blank = default for the stage.",
+        "Prospects - Expected Close Date: DD-MM-YYYY (e.g. 31-12-2026).",
+        "Clients - give a Closed Date (the quarter is worked out automatically) OR a Closed Quarter like 2026-Q3.",
+        "Existing records are matched on Company + Email and updated; others are added.",
+        "Rows with problems are reported back and skipped; good rows are still imported.",
+    ]
+    for i, t in enumerate(lines, start=1):
+        info.cell(row=i, column=1, value=t)
+    info["A1"].font = Font(bold=True, size=14)
+    info.column_dimensions["A"].width = 110
+    ws = wb.create_sheet("Prospects")
+    ws.append(PROSPECT_HEADERS)
+    style_header(ws, [28, 22, 28, 16, 16, 16, 14, 14, 20, 16, 40])
+    dv = DataValidation(type="list", formula1='"' + ",".join(STAGES) + '"', allow_blank=True)
+    ws.add_data_validation(dv)
+    dv.add("G2:G2000")
+    for r in range(2, 2001):
+        ws.cell(row=r, column=9).number_format = "DD-MM-YYYY"
+    ws2 = wb.create_sheet("Clients")
+    ws2.append(CLIENT_HEADERS)
+    style_header(ws2, [28, 22, 28, 16, 16, 16, 16, 16, 16, 40])
+    for r in range(2, 2001):
+        ws2.cell(row=r, column=7).number_format = "DD-MM-YYYY"
+    out = io.BytesIO()
+    wb.save(out)
+    out.seek(0)
+    return out
+
+
+def build_export(conn):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Prospects"
+    ws.append(PROSPECT_HEADERS)
+    for r in conn.execute("SELECT * FROM records WHERE type='prospect' ORDER BY company COLLATE NOCASE"):
+        ws.append([xl_safe(x) for x in (
+            r["company"], r["contact_name"], r["email"], r["phone"], r["owner"], r["source"],
+            r["stage"], r["probability"], r["expected_close"], r["value"], r["notes"])])
+    style_header(ws, [28, 22, 28, 16, 16, 16, 14, 14, 20, 16, 40])
+    ws2 = wb.create_sheet("Clients")
+    ws2.append(CLIENT_HEADERS)
+    for r in conn.execute("SELECT * FROM records WHERE type='client' ORDER BY company COLLATE NOCASE"):
+        ws2.append([xl_safe(x) for x in (
+            r["company"], r["contact_name"], r["email"], r["phone"], r["owner"], r["source"],
+            r["closed_date"], r["closed_quarter"], r["value"], r["notes"])])
+    style_header(ws2, [28, 22, 28, 16, 16, 16, 16, 16, 16, 40])
+    out = io.BytesIO()
+    wb.save(out)
+    out.seek(0)
+    return out
+
+
+# --------------------------------------------------------------------------- reporting
+def funnel(conn):
+    rows = {r["stage"]: r for r in conn.execute(
+        "SELECT stage, COUNT(*) c, COALESCE(SUM(value),0) v, "
+        "COALESCE(SUM(value*probability/100.0),0) w FROM records "
+        "WHERE type='prospect' GROUP BY stage")}
+    out = []
+    for st in OPEN_STAGES:
+        r = rows.get(st)
+        out.append({"stage": st, "count": r["c"] if r else 0,
+                    "value": r["v"] if r else 0, "weighted": r["w"] if r else 0})
+    lost = rows.get("Lost")
+    return out, (lost["c"] if lost else 0)
+
+
+def dashboard_data(conn, cfg):
+    fy = int(cfg["fy_start_month"])
+    stages, lost = funnel(conn)
+    today = datetime.now(TZ).date()
+    clients = conn.execute("SELECT COUNT(*) c, COALESCE(SUM(value),0) v FROM records WHERE type='client'").fetchone()
+    cur_q = quarter_label(today, fy)
+    won_q = conn.execute("SELECT COUNT(*) c, COALESCE(SUM(value),0) v FROM records "
+                         "WHERE type='client' AND closed_quarter=?", (cur_q,)).fetchone()
+    open_n = sum(s["count"] for s in stages)
+    total = clients["c"] + lost
+    overdue = conn.execute(
+        "SELECT * FROM records WHERE type='prospect' AND stage!='Lost' AND expected_close < ? "
+        "ORDER BY expected_close", (today.isoformat(),)).fetchall()
+    upcoming = conn.execute(
+        "SELECT * FROM records WHERE type='prospect' AND stage!='Lost' AND expected_close BETWEEN ? AND ? "
+        "ORDER BY expected_close", (today.isoformat(), (today + timedelta(days=30)).isoformat())).fetchall()
+    no_date = conn.execute("SELECT COUNT(*) c FROM records WHERE type='prospect' AND stage!='Lost' "
+                           "AND expected_close IS NULL").fetchone()["c"]
+    return {
+        "stages": stages, "lost": lost, "open_n": open_n,
+        "pipeline": sum(s["value"] for s in stages), "weighted": sum(s["weighted"] for s in stages),
+        "clients": clients["c"], "won_value": clients["v"],
+        "win_rate": round(100 * clients["c"] / total) if total else None,
+        "cur_q": cur_q, "won_q": won_q, "overdue": overdue, "upcoming": upcoming,
+        "no_date": no_date, "max_count": max([s["count"] for s in stages] + [1]),
+    }
+
+
+def report_data(conn, cfg):
+    fy = int(cfg["fy_start_month"])
+    won = conn.execute(
+        "SELECT COALESCE(closed_quarter,'(no quarter)') q, COUNT(*) c, COALESCE(SUM(value),0) v "
+        "FROM records WHERE type='client' GROUP BY q ORDER BY q DESC").fetchall()
+    forecast = {}
+    for r in conn.execute("SELECT expected_close, value, probability FROM records "
+                          "WHERE type='prospect' AND stage!='Lost'"):
+        if r["expected_close"]:
+            q = quarter_label(date.fromisoformat(r["expected_close"]), fy)
+        else:
+            q = "(no date)"
+        f = forecast.setdefault(q, {"q": q, "c": 0, "v": 0.0, "w": 0.0})
+        f["c"] += 1
+        f["v"] += r["value"] or 0
+        f["w"] += (r["value"] or 0) * (r["probability"] or 0) / 100
+    by_owner = conn.execute(
+        "SELECT COALESCE(owner,'(unassigned)') o, COUNT(*) c, COALESCE(SUM(value),0) v, "
+        "COALESCE(SUM(value*probability/100.0),0) w FROM records "
+        "WHERE type='prospect' AND stage!='Lost' GROUP BY o ORDER BY v DESC").fetchall()
+    by_source = conn.execute(
+        "SELECT COALESCE(source,'(unknown)') s, "
+        "SUM(CASE WHEN type='prospect' AND stage!='Lost' THEN 1 ELSE 0 END) p, "
+        "SUM(CASE WHEN type='client' THEN 1 ELSE 0 END) c FROM records GROUP BY s ORDER BY (p+c) DESC").fetchall()
+    return {"won": won, "forecast": sorted(forecast.values(), key=lambda x: x["q"]),
+            "by_owner": by_owner, "by_source": by_source}
+
+
+# --------------------------------------------------------------------------- e-mail reminders
+def smtp_configured():
+    return bool(os.environ.get("SMTP_HOST") and os.environ.get("SMTP_FROM"))
+
+
+def parse_emails(text):
+    out = []
+    for part in re.split(r"[,;\s]+", text or ""):
+        if part and part not in out:
+            out.append(part)
+    return out
+
+
+def send_email(recipients, subject, text, html_body):
+    msg = EmailMessage()
+    msg["Subject"], msg["From"], msg["To"] = subject, os.environ["SMTP_FROM"], ", ".join(recipients)
+    msg.set_content(text)
+    msg.add_alternative(html_body, subtype="html")
+    host, port = os.environ["SMTP_HOST"], int(os.environ.get("SMTP_PORT", "587"))
+    if os.environ.get("SMTP_SSL") == "1":
+        server = smtplib.SMTP_SSL(host, port, timeout=30)
+    else:
+        server = smtplib.SMTP(host, port, timeout=30)
+        if os.environ.get("SMTP_STARTTLS", "1") != "0":
+            server.starttls()
+    try:
+        if os.environ.get("SMTP_USER"):
+            server.login(os.environ["SMTP_USER"], os.environ.get("SMTP_PASSWORD", ""))
+        server.send_message(msg)
+    finally:
+        try:
+            server.quit()
+        except Exception:
+            pass
+
+
+def fmt_date(s):
+    try:
+        return date.fromisoformat(s).strftime("%d %b %Y")
+    except (TypeError, ValueError):
+        return "-"
+
+
+def fmt_money(v, cur="₹"):
+    return f"{cur}{(v or 0):,.0f}"
+
+
+def build_reminder(conn, cfg):
+    today = datetime.now(TZ).date()
+    cur = cfg["currency"]
+    rows = conn.execute(
+        "SELECT * FROM records WHERE type='prospect' AND stage!='Lost' "
+        "ORDER BY CASE WHEN expected_close IS NULL THEN 1 ELSE 0 END, expected_close, company COLLATE NOCASE"
+    ).fetchall()
+    stages, _ = funnel(conn)
+    e = htmllib.escape
+    subject = f"Weekly prospect reminder - {len(rows)} open prospect(s) - {today.strftime('%d %b %Y')}"
+    t = [f"{cfg['company_name']} - weekly prospect reminder ({today.strftime('%d %b %Y')})", "",
+         "FUNNEL"]
+    for s in stages:
+        t.append(f"  {s['stage']:<12} {s['count']:>3}   {fmt_money(s['value'], cur)}   (weighted {fmt_money(s['weighted'], cur)})")
+    t += ["", f"OPEN PROSPECTS ({len(rows)})"]
+    h = [f"<h2 style='margin:0 0 8px'>{e(cfg['company_name'])} - weekly prospect reminder</h2>",
+         f"<p style='color:#555'>{today.strftime('%A, %d %B %Y')}</p>",
+         "<table cellpadding='6' cellspacing='0' style='border-collapse:collapse;font:14px Arial'>"
+         "<tr style='background:#1f3a5f;color:#fff'><th align='left'>Stage</th><th>Count</th>"
+         "<th align='right'>Value</th><th align='right'>Weighted</th></tr>"]
+    for s in stages:
+        h.append(f"<tr style='border-bottom:1px solid #ddd'><td>{s['stage']}</td><td align='center'>{s['count']}</td>"
+                 f"<td align='right'>{fmt_money(s['value'], cur)}</td><td align='right'>{fmt_money(s['weighted'], cur)}</td></tr>")
+    h.append("</table><h3 style='margin:20px 0 6px'>Open prospects</h3>"
+             "<table cellpadding='6' cellspacing='0' style='border-collapse:collapse;font:13px Arial;width:100%'>"
+             "<tr style='background:#1f3a5f;color:#fff'><th align='left'>Company</th><th align='left'>Contact</th>"
+             "<th align='left'>Stage</th><th>Prob.</th><th align='left'>Expected close</th>"
+             "<th align='right'>Value</th><th align='left'>Owner</th></tr>")
+    for r in rows:
+        flag = ""
+        if r["expected_close"] and r["expected_close"] < today.isoformat():
+            flag = " [OVERDUE]"
+        elif not r["expected_close"]:
+            flag = " [no date]"
+        t.append(f"  - {r['company']} | {r['contact_name'] or '-'} | {r['stage']} | {r['probability']}% | "
+                 f"{fmt_date(r['expected_close'])}{flag} | {fmt_money(r['value'], cur)} | {r['owner'] or '-'}")
+        color = "#b42318" if "OVERDUE" in flag else "#333"
+        h.append(f"<tr style='border-bottom:1px solid #eee;color:{color}'><td>{e(r['company'])}</td>"
+                 f"<td>{e(r['contact_name'] or '-')}</td><td>{e(r['stage'])}</td><td align='center'>{r['probability']}%</td>"
+                 f"<td>{fmt_date(r['expected_close'])}{e(flag)}</td><td align='right'>{fmt_money(r['value'], cur)}</td>"
+                 f"<td>{e(r['owner'] or '-')}</td></tr>")
+    if not rows:
+        t.append("  No open prospects.")
+        h.append("<tr><td colspan='7'>No open prospects.</td></tr>")
+    h.append("</table><p style='color:#888;font-size:12px'>Sent automatically by your CRM.</p>")
+    return subject, "\n".join(t), "".join(h)
+
+
+def send_reminder_now(conn):
+    cfg = get_settings(conn)
+    recipients = parse_emails(cfg["reminder_emails"])
+    if not recipients:
+        raise RuntimeError("No reminder e-mail address is set.")
+    if not smtp_configured():
+        raise RuntimeError("SMTP is not configured on the server (see README).")
+    subject, text, html_body = build_reminder(conn, cfg)
+    send_email(recipients, subject, text, html_body)
+    return len(recipients)
+
+
+def maybe_send_weekly(conn):
+    cfg = get_settings(conn)
+    if cfg["reminder_enabled"] != "1" or not parse_emails(cfg["reminder_emails"]):
+        return
+    now = datetime.now(TZ)
+    if now.weekday() != int(cfg["reminder_day"]) or now.hour < int(cfg["reminder_hour"]):
+        return
+    today = now.date().isoformat()
+    if cfg["reminder_last_attempt"] == today:
+        return
+    set_setting(conn, "reminder_last_attempt", today)
+    conn.commit()
+    stamp = now.strftime("%d %b %Y %H:%M")
+    try:
+        n = send_reminder_now(conn)
+        set_setting(conn, "reminder_last_sent", today)
+        set_setting(conn, "reminder_status", f"Sent {stamp} to {n} recipient(s)")
+        audit(conn, "system", "reminder_sent", f"{n} recipient(s)")
+    except Exception as exc:  # network / auth problems must not kill the scheduler
+        log.exception("weekly reminder failed")
+        set_setting(conn, "reminder_status", f"FAILED {stamp}: {str(exc)[:200]}")
+        audit(conn, "system", "reminder_failed", str(exc)[:200])
+    conn.commit()
+
+
+def scheduler_loop():
+    while True:
+        try:
+            conn = connect()
+            try:
+                maybe_send_weekly(conn)
+            finally:
+                conn.close()
+        except Exception:
+            log.exception("scheduler error")
+        time.sleep(60)
+
+
+_scheduler_lock = threading.Lock()
+_scheduler_started = False
+
+
+def start_scheduler():
+    global _scheduler_started
+    if os.environ.get("CRM_DISABLE_SCHEDULER") == "1":
+        return
+    with _scheduler_lock:
+        if _scheduler_started:
+            return
+        _scheduler_started = True
+        threading.Thread(target=scheduler_loop, daemon=True, name="reminders").start()
+        log.info("Weekly reminder scheduler started")
+
+
+# --------------------------------------------------------------------------- Flask app
+app = Flask(__name__)
+app.config.update(
+    SECRET_KEY=load_secret_key(),
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=os.environ.get("CRM_SECURE_COOKIES") == "1",
+    PERMANENT_SESSION_LIFETIME=timedelta(hours=int(os.environ.get("CRM_SESSION_HOURS", "8"))),
+    MAX_CONTENT_LENGTH=5 * 1024 * 1024,
+)
+init_db()
+
+
+def csrf_token():
+    if "_csrf" not in session:
+        session["_csrf"] = secrets.token_urlsafe(32)
+    return session["_csrf"]
+
+
+app.jinja_env.globals.update(csrf_token=csrf_token, STAGES=STAGES, OPEN_STAGES=OPEN_STAGES,
+                             DAYS=DAYS, DEFAULT_PROB=DEFAULT_PROB)
+
+
+@app.template_filter("fdate")
+def _fdate(s):
+    return fmt_date(s)
+
+
+@app.template_filter("money")
+def _money(v):
+    return fmt_money(v, g.cfg["currency"] if getattr(g, "cfg", None) else "₹")
+
+
+@app.before_request
+def before():
+    if request.endpoint == "static":
+        return
+    if request.method == "POST":
+        sent = request.form.get("_csrf", "")
+        if not sent or not secrets.compare_digest(sent, session.get("_csrf", "")):
+            abort(400)
+    g.db = connect()
+    g.cfg = get_settings(g.db)
+    g.user = None
+    uid = session.get("uid")
+    if uid:
+        u = g.db.execute("SELECT * FROM users WHERE id=? AND active=1", (uid,)).fetchone()
+        if u and session.get("pwv") == u["pw_version"]:
+            g.user = u
+        else:
+            session.clear()
+
+
+@app.teardown_request
+def close_db(_exc):
+    db = g.pop("db", None)
+    if db is not None:
+        db.close()
+
+
+@app.after_request
+def secure_headers(resp):
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["X-Frame-Options"] = "DENY"
+    resp.headers["Referrer-Policy"] = "same-origin"
+    resp.headers["Content-Security-Policy"] = (
+        "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+        "frame-ancestors 'none'; form-action 'self'; base-uri 'self'")
+    if request.endpoint != "static":
+        resp.headers["Cache-Control"] = "no-store"
+    if app.config["SESSION_COOKIE_SECURE"]:
+        resp.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return resp
+
+
+def safe_next(target):
+    if target and target.startswith("/") and not target.startswith("//") and "\\" not in target:
+        return target.rstrip("?")
+    return None
+
+
+def login_required(f):
+    @wraps(f)
+    def wrapper(*a, **k):
+        if not g.user:
+            nxt = request.full_path if request.method == "GET" else None
+            return redirect(url_for("login", next=nxt))
+        if g.user["must_change"] and request.endpoint not in ("change_password", "logout"):
+            return redirect(url_for("change_password"))
+        return f(*a, **k)
+    return wrapper
+
+
+def admin_required(f):
+    @wraps(f)
+    @login_required
+    def wrapper(*a, **k):
+        if g.user["role"] != "admin":
+            abort(403)
+        return f(*a, **k)
+    return wrapper
+
+
+for code, msg in {400: "Bad request or expired form - please go back and retry.",
+                  403: "You do not have permission to do that.",
+                  404: "Page not found.", 413: "File too large (limit 5 MB).",
+                  500: "Something went wrong."}.items():
+    app.register_error_handler(code, lambda e, code=code, msg=msg: (
+        render_template("error.html", code=code, msg=msg), code))
+
+
+# ---- auth
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if g.user:
+        return redirect(url_for("dashboard"))
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        pw = request.form.get("password", "")
+        user = g.db.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
+        now = utcnow()
+        locked = bool(user and user["locked_until"] and datetime.fromisoformat(user["locked_until"]) > now)
+        ok = bool(user) and check_password_hash(user["password_hash"] if user else
+                                                generate_password_hash("x"), pw)
+        if user and ok and user["active"] and not locked:
+            g.db.execute("UPDATE users SET failed_attempts=0, locked_until=NULL, last_login=? WHERE id=?",
+                         (iso(now), user["id"]))
+            audit(g.db, user["username"], "login")
+            g.db.commit()
+            session.clear()
+            session.permanent = True
+            session["uid"], session["pwv"] = user["id"], user["pw_version"]
+            return redirect(safe_next(request.args.get("next")) or url_for("dashboard"))
+        if locked:
+            flash(f"Account temporarily locked after repeated failures. Try again in {LOCK_MINUTES} minutes "
+                  "or ask your admin to unlock it.", "error")
+        else:
+            if user:
+                attempts = user["failed_attempts"] + 1
+                until = iso(now + timedelta(minutes=LOCK_MINUTES)) if attempts >= MAX_LOCK_ATTEMPTS else None
+                g.db.execute("UPDATE users SET failed_attempts=?, locked_until=? WHERE id=?",
+                             (0 if until else attempts, until, user["id"]))
+                audit(g.db, user["username"], "login_failed")
+                g.db.commit()
+            flash("Invalid username or password.", "error")
+    return render_template("login.html")
+
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+
+@app.route("/account/password", methods=["GET", "POST"])
+@login_required
+def change_password():
+    if request.method == "POST":
+        cur, new, new2 = (request.form.get(k, "") for k in ("current", "new", "new2"))
+        problem = None
+        if not check_password_hash(g.user["password_hash"], cur):
+            problem = "Current password is incorrect."
+        elif new != new2:
+            problem = "New passwords do not match."
+        elif new == cur:
+            problem = "New password must be different from the current one."
+        else:
+            problem = password_problem(new, g.user["username"])
+        if problem:
+            flash(problem, "error")
+        else:
+            ver = g.user["pw_version"] + 1
+            g.db.execute("UPDATE users SET password_hash=?, must_change=0, pw_version=? WHERE id=?",
+                         (generate_password_hash(new), ver, g.user["id"]))
+            audit(g.db, g.user["username"], "password_changed")
+            g.db.commit()
+            session["pwv"] = ver
+            flash("Password updated.", "ok")
+            return redirect(url_for("dashboard"))
+    return render_template("change_password.html")
+
+
+# ---- dashboard & reports
+@app.route("/")
+@login_required
+def dashboard():
+    return render_template("dashboard.html", d=dashboard_data(g.db, g.cfg))
+
+
+@app.route("/reports")
+@login_required
+def reports():
+    return render_template("reports.html", d=dashboard_data(g.db, g.cfg), r=report_data(g.db, g.cfg))
+
+
+# ---- records
+def form_values(rec=None):
+    if rec is None:
+        return {}
+    return {k: rec[k] for k in rec.keys()}
+
+
+@app.route("/records")
+@login_required
+def records():
+    kind = "client" if request.args.get("type") == "client" else "prospect"
+    q = request.args.get("q", "").strip()
+    stage = request.args.get("stage", "")
+    page = max(request.args.get("page", 1, type=int), 1)
+    where, args = ["type=?"], [kind]
+    if q:
+        where.append("(company LIKE ? OR contact_name LIKE ? OR email LIKE ? OR owner LIKE ?)")
+        args += [f"%{q}%"] * 4
+    if kind == "prospect" and stage in STAGES:
+        where.append("stage=?")
+        args.append(stage)
+    elif kind == "prospect" and stage == "open":
+        where.append("stage!='Lost'")
+    w = " AND ".join(where)
+    total = g.db.execute(f"SELECT COUNT(*) FROM records WHERE {w}", args).fetchone()[0]
+    order = ("CASE WHEN expected_close IS NULL THEN 1 ELSE 0 END, expected_close, company COLLATE NOCASE"
+             if kind == "prospect" else "closed_date DESC, company COLLATE NOCASE")
+    rows = g.db.execute(f"SELECT * FROM records WHERE {w} ORDER BY {order} LIMIT ? OFFSET ?",
+                        args + [PAGE_SIZE, (page - 1) * PAGE_SIZE]).fetchall()
+    pages = max((total + PAGE_SIZE - 1) // PAGE_SIZE, 1)
+    return render_template("records.html", kind=kind, rows=rows, q=q, stage=stage, page=page,
+                           pages=pages, total=total, today=datetime.now(TZ).date().isoformat())
+
+
+def save_from_form(rid=None):
+    kind = "client" if request.form.get("type") == "client" else "prospect"
+    raw = {k: request.form.get(k) for k in
+           ("company", "contact_name", "email", "phone", "owner", "source", "stage", "probability",
+            "expected_close", "value", "closed_date", "closed_quarter", "notes")}
+    d, errors = normalize(raw, kind, int(g.cfg["fy_start_month"]))
+    if errors:
+        for e in errors:
+            flash(e, "error")
+        return None, raw | {"type": kind}
+    if rid:
+        update_record(g.db, rid, d, g.user["id"])
+        audit(g.db, g.user["username"], "record_updated", f"#{rid} {d['company']}")
+    else:
+        rid = insert_record(g.db, d, g.user["id"])
+        audit(g.db, g.user["username"], "record_created", f"#{rid} {d['company']}")
+    g.db.commit()
+    return d, rid
+
+
+@app.route("/records/new", methods=["GET", "POST"])
+@login_required
+def record_new():
+    kind = "client" if request.values.get("type") == "client" else "prospect"
+    if request.method == "POST":
+        d, res = save_from_form()
+        if d:
+            flash(f"{d['company']} saved.", "ok")
+            return redirect(url_for("records", type=d["type"]))
+        return render_template("record_form.html", rec=res, kind=res["type"], is_new=True)
+    return render_template("record_form.html", rec={"type": kind, "stage": "Lead", "probability": 10},
+                           kind=kind, is_new=True)
+
+
+@app.route("/records/<int:rid>/edit", methods=["GET", "POST"])
+@login_required
+def record_edit(rid):
+    rec = g.db.execute("SELECT * FROM records WHERE id=?", (rid,)).fetchone()
+    if not rec:
+        abort(404)
+    if request.method == "POST":
+        d, res = save_from_form(rid)
+        if d:
+            flash(f"{d['company']} updated.", "ok")
+            return redirect(url_for("records", type=d["type"]))
+        return render_template("record_form.html", rec=res | {"id": rid}, kind=res["type"], is_new=False)
+    data = form_values(rec)
+    kind = rec["type"]
+    if request.args.get("convert") == "1" and kind == "prospect":
+        kind = data["type"] = "client"
+        data["closed_date"] = datetime.now(TZ).date().isoformat()
+    return render_template("record_form.html", rec=data, kind=kind, is_new=False,
+                           converting=request.args.get("convert") == "1")
+
+
+@app.route("/records/<int:rid>/delete", methods=["POST"])
+@admin_required
+def record_delete(rid):
+    rec = g.db.execute("SELECT type, company FROM records WHERE id=?", (rid,)).fetchone()
+    if not rec:
+        abort(404)
+    g.db.execute("DELETE FROM records WHERE id=?", (rid,))
+    audit(g.db, g.user["username"], "record_deleted", f"#{rid} {rec['company']}")
+    g.db.commit()
+    flash(f"{rec['company']} deleted.", "ok")
+    return redirect(url_for("records", type=rec["type"]))
+
+
+# ---- import / export
+@app.route("/data", methods=["GET", "POST"])
+@login_required
+def data_page():
+    result = None
+    if request.method == "POST":
+        f = request.files.get("file")
+        if not f or not f.filename:
+            flash("Choose an Excel (.xlsx) file first.", "error")
+        elif not f.filename.lower().endswith(".xlsx"):
+            flash("Only .xlsx files are supported. In Excel use File > Save As > Excel Workbook.", "error")
+        else:
+            dry = request.form.get("dry_run") == "1"
+            try:
+                result = import_workbook(g.db, f.stream, int(g.cfg["fy_start_month"]),
+                                         request.form.get("update_existing") == "1", dry, g.user["id"])
+            except Exception as exc:
+                g.db.rollback()
+                log.warning("import failed: %s", exc)
+                flash("Could not read that file - is it a valid .xlsx workbook?", "error")
+            else:
+                if dry:
+                    g.db.rollback()
+                else:
+                    audit(g.db, g.user["username"], "import",
+                          f"{f.filename[:80]}: +{result['created']} ~{result['updated']} !{len(result['errors'])}")
+                    g.db.commit()
+                result["dry"] = dry
+    return render_template("data.html", result=result)
+
+
+@app.route("/template.xlsx")
+@login_required
+def download_template():
+    return send_file(build_template(), as_attachment=True, download_name="crm_import_template.xlsx",
+                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+@app.route("/export.xlsx")
+@login_required
+def download_export():
+    audit(g.db, g.user["username"], "export")
+    g.db.commit()
+    name = f"crm_export_{datetime.now(TZ).strftime('%Y%m%d')}.xlsx"
+    return send_file(build_export(g.db), as_attachment=True, download_name=name,
+                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+# ---- admin: users
+USERNAME_RE = re.compile(r"^[A-Za-z0-9_.@-]{3,40}$")
+
+
+def active_admin_count(db, exclude=None):
+    q = "SELECT COUNT(*) FROM users WHERE role='admin' AND active=1"
+    a = []
+    if exclude:
+        q += " AND id!=?"
+        a.append(exclude)
+    return db.execute(q, a).fetchone()[0]
+
+
+@app.route("/admin/users")
+@admin_required
+def users():
+    rows = g.db.execute("SELECT * FROM users ORDER BY role, username").fetchall()
+    return render_template("users.html", rows=rows, now=iso(utcnow()))
+
+
+@app.route("/admin/users/new", methods=["GET", "POST"])
+@admin_required
+def user_new():
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        email = request.form.get("email", "").strip()
+        role = "admin" if request.form.get("role") == "admin" else "user"
+        pw = request.form.get("password", "")
+        err = None
+        if not USERNAME_RE.match(username):
+            err = "Username must be 3-40 characters: letters, numbers and . _ @ -"
+        elif g.db.execute("SELECT 1 FROM users WHERE username=?", (username,)).fetchone():
+            err = "That username already exists."
+        elif email and not EMAIL_RE.match(email):
+            err = "Invalid e-mail address."
+        else:
+            err = password_problem(pw, username)
+        if err:
+            flash(err, "error")
+        else:
+            g.db.execute("INSERT INTO users(username,email,password_hash,role,must_change,created_at) "
+                         "VALUES(?,?,?,?,1,?)",
+                         (username, email or None, generate_password_hash(pw), role, iso(utcnow())))
+            audit(g.db, g.user["username"], "user_created", f"{username} ({role})")
+            g.db.commit()
+            flash(f"User {username} created. They must change the password at first login.", "ok")
+            return redirect(url_for("users"))
+    return render_template("user_form.html", u=None, suggestion=secrets.token_urlsafe(9) + "7a")
+
+
+@app.route("/admin/users/<int:uid>", methods=["GET", "POST"])
+@admin_required
+def user_edit(uid):
+    u = g.db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+    if not u:
+        abort(404)
+    if request.method == "POST":
+        email = request.form.get("email", "").strip()
+        role = "admin" if request.form.get("role") == "admin" else "user"
+        active = 1 if request.form.get("active") == "1" else 0
+        pw = request.form.get("password", "")
+        err = None
+        if email and not EMAIL_RE.match(email):
+            err = "Invalid e-mail address."
+        elif (role != "admin" or not active) and u["role"] == "admin" and u["active"] \
+                and active_admin_count(g.db, exclude=uid) == 0:
+            err = "There must be at least one active admin."
+        elif uid == g.user["id"] and not active:
+            err = "You cannot deactivate your own account."
+        elif pw:
+            err = password_problem(pw, u["username"])
+        if err:
+            flash(err, "error")
+        else:
+            g.db.execute("UPDATE users SET email=?, role=?, active=? WHERE id=?",
+                         (email or None, role, active, uid))
+            if request.form.get("unlock") == "1":
+                g.db.execute("UPDATE users SET failed_attempts=0, locked_until=NULL WHERE id=?", (uid,))
+            if pw:
+                g.db.execute("UPDATE users SET password_hash=?, must_change=1, pw_version=pw_version+1 "
+                             "WHERE id=?", (generate_password_hash(pw), uid))
+                audit(g.db, g.user["username"], "password_reset", u["username"])
+            audit(g.db, g.user["username"], "user_updated", f"{u['username']} role={role} active={active}")
+            g.db.commit()
+            if uid == g.user["id"] and pw:
+                session["pwv"] = g.db.execute("SELECT pw_version FROM users WHERE id=?", (uid,)).fetchone()[0]
+            flash("User updated.", "ok")
+            return redirect(url_for("users"))
+    return render_template("user_form.html", u=u, suggestion=secrets.token_urlsafe(9) + "7a")
+
+
+# ---- admin: settings & audit
+@app.route("/admin/settings", methods=["GET", "POST"])
+@admin_required
+def settings():
+    if request.method == "POST":
+        action = request.form.get("action")
+        if action == "test":
+            try:
+                n = send_reminder_now(g.db)
+                flash(f"Reminder sent to {n} recipient(s).", "ok")
+                audit(g.db, g.user["username"], "reminder_test", f"{n} recipient(s)")
+            except Exception as exc:
+                flash(f"Could not send: {str(exc)[:200]}", "error")
+            g.db.commit()
+            return redirect(url_for("settings"))
+        emails = parse_emails(request.form.get("reminder_emails"))
+        bad = [x for x in emails if not EMAIL_RE.match(x)]
+        company = (request.form.get("company_name") or "My CRM").strip()[:60]
+        currency = (request.form.get("currency") or "₹").strip()[:4]
+        try:
+            fy = int(request.form.get("fy_start_month", 1))
+            day, hour = int(request.form.get("reminder_day", 0)), int(request.form.get("reminder_hour", 9))
+            assert 1 <= fy <= 12 and 0 <= day <= 6 and 0 <= hour <= 23
+        except (ValueError, AssertionError):
+            flash("Invalid number in settings.", "error")
+            return redirect(url_for("settings"))
+        if bad:
+            flash(f"Invalid e-mail address: {', '.join(bad)}", "error")
+        else:
+            old_fy = int(g.cfg["fy_start_month"])
+            for k, v in {"company_name": company, "currency": currency, "fy_start_month": fy,
+                         "reminder_emails": ", ".join(emails), "reminder_day": day, "reminder_hour": hour,
+                         "reminder_enabled": "1" if request.form.get("reminder_enabled") == "1" else "0"}.items():
+                set_setting(g.db, k, v)
+            if fy != old_fy:   # re-label quarters of dated clients
+                for r in g.db.execute("SELECT id, closed_date FROM records "
+                                      "WHERE type='client' AND closed_date IS NOT NULL").fetchall():
+                    g.db.execute("UPDATE records SET closed_quarter=? WHERE id=?",
+                                 (quarter_label(date.fromisoformat(r["closed_date"]), fy), r["id"]))
+            audit(g.db, g.user["username"], "settings_updated")
+            g.db.commit()
+            flash("Settings saved.", "ok")
+            return redirect(url_for("settings"))
+    return render_template("settings.html", smtp=smtp_configured(), tz=str(TZ))
+
+
+@app.route("/admin/audit")
+@admin_required
+def audit_view():
+    rows = g.db.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT 200").fetchall()
+    return render_template("audit.html", rows=rows)
+
+
+# ---- CLI helpers
+@app.cli.command("send-reminders")
+def cli_send_reminders():
+    """Send the weekly prospect reminder immediately (for cron use)."""
+    conn = connect()
+    n = send_reminder_now(conn)
+    print(f"Sent to {n} recipient(s)")
+
+
+@app.cli.command("reset-password")
+def cli_reset_password():
+    """Reset a user's password: flask --app app reset-password USERNAME"""
+    import click
+    username = click.prompt("Username")
+    pw = click.prompt("New password", hide_input=True, confirmation_prompt=True)
+    problem = password_problem(pw, username)
+    if problem:
+        raise click.ClickException(problem)
+    conn = connect()
+    cur = conn.execute("UPDATE users SET password_hash=?, must_change=1, active=1, failed_attempts=0, "
+                       "locked_until=NULL, pw_version=pw_version+1 WHERE username=?",
+                       (generate_password_hash(pw), username))
+    conn.commit()
+    print("Password reset." if cur.rowcount else "No such user.")
+
+
+if __name__ == "__main__":
+    start_scheduler()
+    app.run(host=os.environ.get("CRM_HOST", "127.0.0.1"), port=int(os.environ.get("PORT", 5000)))

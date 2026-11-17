@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}{{ 'Manage ' ~ u.username if u else 'Add user' }}{% endblock %}
+{% block content %}
+<h1>{{ 'Manage ' ~ u.username if u else 'Add user' }}</h1>
+<p class="sub">{{ 'Change role, disable the account, unlock it, or set a new temporary password.' if u else 'The user must change this temporary password at first sign-in.' }}</p>
+<form method="post" class="card" style="max-width:560px">
+  <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+  {% if not u %}
+  <p><label>Login ID *</label><input name="username" type="text" maxlength="40" required autocomplete="off"></p>
+  {% endif %}
+  <p><label>E-mail</label><input name="email" type="email" value="{{ u.email or '' if u else '' }}"></p>
+  <p><label>Role</label>
+    <select name="role">
+      <option value="user" {{ 'selected' if u and u.role == 'user' }}>User – add &amp; edit prospects/clients, import, reports</option>
+      <option value="admin" {{ 'selected' if u and u.role == 'admin' }}>Admin – also manage users, settings, delete records</option>
+    </select></p>
+  {% if u %}
+  <p class="check"><input type="checkbox" id="active" name="active" value="1" {{ 'checked' if u.active }}>
+    <label for="active" style="margin:0;font-weight:500">Account active</label></p>
+  <p class="check"><input type="checkbox" id="unlock" name="unlock" value="1">
+    <label for="unlock" style="margin:0;font-weight:500">Clear lock / failed login attempts</label></p>
+  {% endif %}
+  <p><label>{{ 'Set new temporary password (optional)' if u else 'Temporary password *' }}</label>
+    <input name="password" type="text" autocomplete="off" {{ 'required' if not u }} {% if not u %}value="{{ suggestion }}"{% endif %}>
+    <span class="hint">At least 10 characters with letters and numbers. {% if u %}Setting one signs the user out everywhere.{% else %}Share it with the user securely.{% endif %}</span></p>
+  <div class="bar"><button type="submit">Save</button><a class="btn alt" href="{{ url_for('users') }}">Cancel</a></div>
+</form>
+{% endblock %}

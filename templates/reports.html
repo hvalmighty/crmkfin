@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Reports{% endblock %}
+{% block content %}
+<div class="bar"><div class="grow"><h1>Reports</h1>
+  <p class="sub" style="margin:0">Quarters use {% if g.cfg.fy_start_month == '1' %}calendar year{% else %}a financial year starting month {{ g.cfg.fy_start_month }}{% endif %} (change in Settings).</p></div>
+  <a class="btn alt" href="{{ url_for('download_export') }}">Download all data (.xlsx)</a></div>
+
+<div class="card">
+  <h2>Sales funnel</h2>
+  {% include "_funnel.html" %}
+  <div class="scroll"><table style="margin-top:12px">
+    <tr><th>Stage</th><th class="r">Prospects</th><th class="r">Value</th><th class="r">Weighted</th></tr>
+    {% for s in d.stages %}<tr><td>{{ s.stage }}</td><td class="r">{{ s.count }}</td><td class="r">{{ s.value | money }}</td><td class="r">{{ s.weighted | money }}</td></tr>{% endfor %}
+    <tr><th>Total open</th><th class="r">{{ d.open_n }}</th><th class="r">{{ d.pipeline | money }}</th><th class="r">{{ d.weighted | money }}</th></tr>
+  </table></div>
+</div>
+
+<div class="grid two">
+  <div class="card">
+    <h2>Forecast by expected closure quarter</h2>
+    {% if r.forecast %}<div class="scroll"><table>
+      <tr><th>Quarter</th><th class="r">Prospects</th><th class="r">Value</th><th class="r">Weighted</th></tr>
+      {% for f in r.forecast %}<tr><td>{{ f.q }}</td><td class="r">{{ f.c }}</td><td class="r">{{ f.v | money }}</td><td class="r">{{ f.w | money }}</td></tr>{% endfor %}
+    </table></div>{% else %}<p class="empty">No open prospects.</p>{% endif %}
+  </div>
+  <div class="card">
+    <h2>Converted clients by quarter</h2>
+    {% if r.won %}<div class="scroll"><table>
+      <tr><th>Quarter</th><th class="r">Clients</th><th class="r">Value</th></tr>
+      {% for w in r.won %}<tr><td>{{ w.q }}</td><td class="r">{{ w.c }}</td><td class="r">{{ w.v | money }}</td></tr>{% endfor %}
+    </table></div>{% else %}<p class="empty">No clients yet.</p>{% endif %}
+  </div>
+</div>
+
+<div class="grid two">
+  <div class="card">
+    <h2>Open pipeline by owner</h2>
+    {% if r.by_owner %}<div class="scroll"><table>
+      <tr><th>Owner</th><th class="r">Prospects</th><th class="r">Value</th><th class="r">Weighted</th></tr>
+      {% for o in r.by_owner %}<tr><td>{{ o.o }}</td><td class="r">{{ o.c }}</td><td class="r">{{ o.v | money }}</td><td class="r">{{ o.w | money }}</td></tr>{% endfor %}
+    </table></div>{% else %}<p class="empty">No data.</p>{% endif %}
+  </div>
+  <div class="card">
+    <h2>By lead source</h2>
+    {% if r.by_source %}<div class="scroll"><table>
+      <tr><th>Source</th><th class="r">Open prospects</th><th class="r">Clients</th></tr>
+      {% for s in r.by_source %}<tr><td>{{ s.s }}</td><td class="r">{{ s.p }}</td><td class="r">{{ s.c }}</td></tr>{% endfor %}
+    </table></div>{% else %}<p class="empty">No data.</p>{% endif %}
+  </div>
+</div>
+{% endblock %}

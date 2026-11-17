@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Activity{% endblock %}
+{% block content %}
+<h1>Activity log</h1>
+<p class="sub">Last 200 events (logins, changes, imports, exports).</p>
+<div class="card" style="padding:0"><div class="scroll"><table>
+  <tr><th>Time (UTC)</th><th>User</th><th>Action</th><th>Detail</th></tr>
+  {% for r in rows %}<tr><td style="white-space:nowrap">{{ r.ts }}</td><td>{{ r.username or '' }}</td><td>{{ r.action }}</td><td>{{ r.detail or '' }}</td></tr>
+  {% else %}<tr><td colspan="4" class="empty">No activity yet.</td></tr>{% endfor %}
+</table></div></div>
+{% endblock %}
