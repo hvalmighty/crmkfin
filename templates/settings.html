@@ -29,7 +29,6 @@
   <h2 style="margin-top:22px">General</h2>
   <div class="form-grid">
     <div><label>Company / app name</label><input name="company_name" type="text" maxlength="60" value="{{ g.cfg.company_name }}"></div>
-    <div><label>Currency symbol</label><input name="currency" type="text" maxlength="4" value="{{ g.cfg.currency }}"></div>
     <div><label>Quarters start in</label>
       <select name="fy_start_month">
         {% for m in ['January (calendar year)','February','March','April (India FY)','May','June','July','August','September','October','November','December'] %}
@@ -47,4 +46,10 @@
   <p class="muted">Sends the reminder to the saved addresses right now (save any changes above first).</p>
   <button type="submit" name="action" value="test" class="alt">Send reminder now</button>
 </form>
+
+<div class="card" style="max-width:720px;border-color:#f1c0bb">
+  <h2 style="color:var(--bad)">Danger zone</h2>
+  <p class="muted">Delete all prospects and/or clients from the system.</p>
+  <a class="btn danger" href="{{ url_for('danger_zone') }}">Delete data…</a>
+</div>
 {% endblock %}

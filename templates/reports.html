@@ -2,16 +2,16 @@
 {% block title %}Reports{% endblock %}
 {% block content %}
 <div class="bar"><div class="grow"><h1>Reports</h1>
-  <p class="sub" style="margin:0">Quarters use {% if g.cfg.fy_start_month == '1' %}calendar year{% else %}a financial year starting month {{ g.cfg.fy_start_month }}{% endif %} (change in Settings).</p></div>
+  <p class="sub" style="margin:0">Quarters use {% if g.cfg.fy_start_month == '1' %}calendar year{% else %}a financial year starting month {{ g.cfg.fy_start_month }}{% endif %} (change in Settings). INR (₹) and USD ($) amounts are tracked separately – nothing is converted.</p></div>
   <a class="btn alt" href="{{ url_for('download_export') }}">Download all data (.xlsx)</a></div>
 
 <div class="card">
   <h2>Sales funnel</h2>
   {% include "_funnel.html" %}
   <div class="scroll"><table style="margin-top:12px">
-    <tr><th>Stage</th><th class="r">Prospects</th><th class="r">Value</th><th class="r">Weighted</th></tr>
-    {% for s in d.stages %}<tr><td>{{ s.stage }}</td><td class="r">{{ s.count }}</td><td class="r">{{ s.value | money }}</td><td class="r">{{ s.weighted | money }}</td></tr>{% endfor %}
-    <tr><th>Total open</th><th class="r">{{ d.open_n }}</th><th class="r">{{ d.pipeline | money }}</th><th class="r">{{ d.weighted | money }}</th></tr>
+    <tr><th>Stage</th><th class="r">Prospects</th><th class="r">Value ₹</th><th class="r">Weighted ₹</th><th class="r">Value $</th><th class="r">Weighted $</th></tr>
+    {% for s in d.stages %}<tr><td>{{ s.stage }}</td><td class="r">{{ s.count }}</td><td class="r">{{ s.value | money }}</td><td class="r">{{ s.weighted | money }}</td><td class="r">{{ s.value_usd | usd }}</td><td class="r">{{ s.weighted_usd | usd }}</td></tr>{% endfor %}
+    <tr><th>Total open</th><th class="r">{{ d.open_n }}</th><th class="r">{{ d.pipeline | money }}</th><th class="r">{{ d.weighted | money }}</th><th class="r">{{ d.pipeline_usd | usd }}</th><th class="r">{{ d.weighted_usd | usd }}</th></tr>
   </table></div>
 </div>
 
@@ -19,15 +19,15 @@
   <div class="card">
     <h2>Forecast by expected closure quarter</h2>
     {% if r.forecast %}<div class="scroll"><table>
-      <tr><th>Quarter</th><th class="r">Prospects</th><th class="r">Value</th><th class="r">Weighted</th></tr>
-      {% for f in r.forecast %}<tr><td>{{ f.q }}</td><td class="r">{{ f.c }}</td><td class="r">{{ f.v | money }}</td><td class="r">{{ f.w | money }}</td></tr>{% endfor %}
+      <tr><th>Quarter</th><th class="r">Prospects</th><th class="r">Value ₹</th><th class="r">Weighted ₹</th><th class="r">Value $</th><th class="r">Weighted $</th></tr>
+      {% for f in r.forecast %}<tr><td>{{ f.q }}</td><td class="r">{{ f.c }}</td><td class="r">{{ f.v | money }}</td><td class="r">{{ f.w | money }}</td><td class="r">{{ f.vu | usd }}</td><td class="r">{{ f.wu | usd }}</td></tr>{% endfor %}
     </table></div>{% else %}<p class="empty">No open prospects.</p>{% endif %}
   </div>
   <div class="card">
     <h2>Converted clients by quarter</h2>
     {% if r.won %}<div class="scroll"><table>
-      <tr><th>Quarter</th><th class="r">Clients</th><th class="r">Value</th></tr>
-      {% for w in r.won %}<tr><td>{{ w.q }}</td><td class="r">{{ w.c }}</td><td class="r">{{ w.v | money }}</td></tr>{% endfor %}
+      <tr><th>Quarter</th><th class="r">Clients</th><th class="r">Value ₹</th><th class="r">Value $</th></tr>
+      {% for w in r.won %}<tr><td>{{ w.q }}</td><td class="r">{{ w.c }}</td><td class="r">{{ w.v | money }}</td><td class="r">{{ w.vu | usd }}</td></tr>{% endfor %}
     </table></div>{% else %}<p class="empty">No clients yet.</p>{% endif %}
   </div>
 </div>
@@ -36,8 +36,8 @@
   <div class="card">
     <h2>Open pipeline by owner</h2>
     {% if r.by_owner %}<div class="scroll"><table>
-      <tr><th>Owner</th><th class="r">Prospects</th><th class="r">Value</th><th class="r">Weighted</th></tr>
-      {% for o in r.by_owner %}<tr><td>{{ o.o }}</td><td class="r">{{ o.c }}</td><td class="r">{{ o.v | money }}</td><td class="r">{{ o.w | money }}</td></tr>{% endfor %}
+      <tr><th>Owner</th><th class="r">Prospects</th><th class="r">Value ₹</th><th class="r">Weighted ₹</th><th class="r">Value $</th><th class="r">Weighted $</th></tr>
+      {% for o in r.by_owner %}<tr><td>{{ o.o }}</td><td class="r">{{ o.c }}</td><td class="r">{{ o.v | money }}</td><td class="r">{{ o.w | money }}</td><td class="r">{{ o.vu | usd }}</td><td class="r">{{ o.wu | usd }}</td></tr>{% endfor %}
     </table></div>{% else %}<p class="empty">No data.</p>{% endif %}
   </div>
   <div class="card">
@@ -48,13 +48,15 @@
     </table></div>{% else %}<p class="empty">No data.</p>{% endif %}
   </div>
 </div>
+
 {% for title, rows, label in (('By region / country', r.by_region, 'Region / Country'), ('By presales lead', r.by_presales, 'Presales lead')) %}
 <div class="card">
   <h2>{{ title }}</h2>
   {% if rows %}<div class="scroll"><table>
-    <tr><th>{{ label }}</th><th class="r">Open prospects</th><th class="r">Pipeline</th><th class="r">Weighted</th><th class="r">Clients</th><th class="r">Won value</th><th class="r">Lost</th><th class="r">Win rate</th></tr>
+    <tr><th>{{ label }}</th><th class="r">Open prospects</th><th class="r">Pipeline ₹</th><th class="r">Weighted ₹</th><th class="r">Pipeline $</th><th class="r">Weighted $</th><th class="r">Clients</th><th class="r">Won ₹</th><th class="r">Won $</th><th class="r">Lost</th><th class="r">Win rate</th></tr>
     {% for x in rows %}<tr><td>{{ x.name }}</td><td class="r">{{ x.open_n }}</td><td class="r">{{ x.open_value | money }}</td><td class="r">{{ x.weighted | money }}</td>
-      <td class="r">{{ x.clients }}</td><td class="r">{{ x.won_value | money }}</td><td class="r">{{ x.lost }}</td><td class="r">{{ (x.win_rate ~ '%') if x.win_rate is not none else '–' }}</td></tr>{% endfor %}
+      <td class="r">{{ x.open_value_usd | usd }}</td><td class="r">{{ x.weighted_usd | usd }}</td>
+      <td class="r">{{ x.clients }}</td><td class="r">{{ x.won_value | money }}</td><td class="r">{{ x.won_value_usd | usd }}</td><td class="r">{{ x.lost }}</td><td class="r">{{ (x.win_rate ~ '%') if x.win_rate is not none else '–' }}</td></tr>{% endfor %}
   </table></div>
   <p class="muted" style="margin:8px 0 0;font-size:13px">Win rate = clients ÷ (clients + lost). Spellings that differ only by upper/lower case are grouped together.{% if rows | selectattr('unset') | list %} “(not set)” = records with no {{ label | lower }} filled in.{% endif %}</p>
   {% else %}<p class="empty">No data.</p>{% endif %}

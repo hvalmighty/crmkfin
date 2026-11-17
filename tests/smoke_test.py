@@ -213,5 +213,75 @@ check("export has region/presales in right columns", vals["Gulf Trade"][hdr.inde
 subj, text, html = crm.build_reminder(crm.connect(), crm.get_settings(crm.connect()))
 check("reminder e-mail includes region + presales", "presales: Anil" in text and "Anil" in html and "UAE" in html)
 
+
+# 19. INR + USD amounts
+t = token(path="/records/new")
+c.post("/records/new", data={"_csrf": t, "type": "prospect", "company": "Dollar Co", "stage": "Negotiation", "probability": "50",
+                             "value": "8,00,000", "value_usd": "$10,000", "region": "USA", "expected_close": "2027-02-10"}, follow_redirects=True)
+c.post("/records/new", data={"_csrf": t, "type": "client", "company": "Dollar Client", "closed_date": "2026-09-01",
+                             "value": "100000", "value_usd": "2500"}, follow_redirects=True)
+row = crm.connect().execute("SELECT value, value_usd FROM records WHERE company='Dollar Co'").fetchone()
+check("form saves INR and USD separately", row["value"] == 800000 and row["value_usd"] == 10000, dict(row))
+r = c.post("/records/new", data={"_csrf": t, "type": "prospect", "company": "BadUsd", "value_usd": "abc"})
+check("bad USD amount rejected with clear message", b"Value (USD)" in r.data and b"not a number" in r.data)
+check("'N/A' / '-' amounts treated as blank", crm.parse_money("N/A") is None and crm.parse_money(" - ") is None and crm.parse_money("\u20b92,50,000") == 250000)
+wb = Workbook(); ws = wb.active; ws.title = "Prospects"
+ws.append(["Company", "Expected Value (INR)", "Expected Value (USD)", "Stage"])
+ws.append(["ExcelDual", 400000, 5000, "Proposal"]); ws.append(["ExcelInrOnly", 90000, None, "Lead"])
+bio = io.BytesIO(); wb.save(bio)
+t = token(path="/data")
+c.post("/data", data={"_csrf": t, "update_existing": "1", "file": (io.BytesIO(bio.getvalue()), "u.xlsx")}, content_type="multipart/form-data")
+d1 = crm.connect().execute("SELECT value, value_usd FROM records WHERE company='ExcelDual'").fetchone()
+d2 = crm.connect().execute("SELECT value, value_usd FROM records WHERE company='ExcelInrOnly'").fetchone()
+check("Excel import reads INR and USD columns", d1["value"] == 400000 and d1["value_usd"] == 5000 and d2["value"] == 90000 and d2["value_usd"] is None, (dict(d1), dict(d2)))
+tw = load_workbook(io.BytesIO(c.get("/template.xlsx").data))
+check("template has INR + USD columns", {"Expected Value (INR)", "Expected Value (USD)"} <= {x.value for x in tw["Prospects"][1]} and {"Deal Value (INR)", "Deal Value (USD)"} <= {x.value for x in tw["Clients"][1]})
+ex = load_workbook(io.BytesIO(c.get("/export.xlsx").data)); hdr = [x.value for x in ex["Prospects"][1]]
+vals = {r[0].value: r for r in ex["Prospects"].iter_rows(min_row=2)}
+check("export puts USD in its own column", vals["Dollar Co"][hdr.index("Expected Value (USD)")].value == 10000 and vals["Dollar Co"][hdr.index("Expected Value (INR)")].value == 800000)
+fn = crm.funnel(crm.connect())[0]; neg = [x for x in fn if x["stage"] == "Negotiation"][0]
+check("funnel carries USD + weighted USD", neg["value_usd"] >= 10000 and neg["weighted_usd"] >= 5000, neg)
+b = {x["name"].lower(): x for x in crm.breakdown(crm.connect(), "region")}
+check("region report has USD pipeline", b["usa"]["open_value_usd"] == 10000 and b["usa"]["weighted_usd"] == 5000, b.get("usa"))
+dash = c.get("/").get_data(as_text=True); rep = c.get("/reports").get_data(as_text=True)
+check("dashboard shows USD", "USD" in dash and "$" in dash)
+check("reports show USD columns", "Value $" in rep and "Weighted $" in rep and "$10,000" in rep)
+check("lists show both amounts", b"Value (USD)" in c.get("/records?type=prospect").data and b"Deal value (USD)" in c.get("/records?type=client").data)
+subj, text, html = crm.build_reminder(crm.connect(), crm.get_settings(crm.connect()))
+check("reminder e-mail shows INR and USD", "$10,000" in text and "\u20b98,00,000".replace("8,00,000", "800,000") in text and "Value (USD)" in html, text[:600])
+check("settings page no longer asks for currency symbol", b'name="currency"' not in c.get("/admin/settings").data)
+
+# 20. admin delete-all (destructive - keep last)
+before = crm.connect().execute("SELECT COUNT(*) FROM records").fetchone()[0]
+check("have data to delete", before > 5, before)
+check("delete page opens for admin", c.get("/admin/delete-data").status_code == 200)
+t = token(path="/admin/delete-data")
+r = c.post("/admin/delete-data", data={"_csrf": t, "scope": "all", "confirm": "delete", "password": "NewSecret2026x"}, follow_redirects=True)
+check("wrong confirmation word deletes nothing", b"type DELETE" in r.data and crm.connect().execute("SELECT COUNT(*) FROM records").fetchone()[0] == before)
+r = c.post("/admin/delete-data", data={"_csrf": t, "scope": "all", "confirm": "DELETE", "password": "wrong-password"}, follow_redirects=True)
+check("wrong password deletes nothing", b"password was incorrect" in r.data and crm.connect().execute("SELECT COUNT(*) FROM records").fetchone()[0] == before)
+check("bad scope rejected", c.post("/admin/delete-data", data={"_csrf": t, "scope": "users", "confirm": "DELETE", "password": "NewSecret2026x"}).status_code == 400)
+check("csrf required", c.post("/admin/delete-data", data={"scope": "all", "confirm": "DELETE", "password": "NewSecret2026x"}).status_code == 400)
+ts2 = token(sc, "/account/password")
+sc.post("/account/password", data={"_csrf": ts2, "current": "TempPass12345", "new": "SamPass2026x", "new2": "SamPass2026x"})
+check("non-admin blocked from delete page", sc.get("/admin/delete-data").status_code == 403)
+ts2 = token(sc, "/records")
+check("non-admin cannot POST delete", sc.post("/admin/delete-data", data={"_csrf": ts2, "scope": "all", "confirm": "DELETE", "password": "SamPass2026x"}).status_code == 403)
+check("non-admin did not delete", crm.connect().execute("SELECT COUNT(*) FROM records").fetchone()[0] == before)
+nclients = crm.connect().execute("SELECT COUNT(*) FROM records WHERE type='client'").fetchone()[0]
+r = c.post("/admin/delete-data", data={"_csrf": t, "scope": "clients", "confirm": "DELETE", "password": "NewSecret2026x"}, follow_redirects=True)
+left = crm.connect().execute("SELECT COUNT(*), SUM(CASE WHEN type='client' THEN 1 ELSE 0 END) FROM records").fetchone()
+check("delete all clients keeps prospects", left[0] == before - nclients and not left[1], (before, nclients, tuple(left)))
+r = c.post("/admin/delete-data", data={"_csrf": t, "scope": "prospects", "confirm": "DELETE", "password": "NewSecret2026x"}, follow_redirects=True)
+check("delete all prospects", crm.connect().execute("SELECT COUNT(*) FROM records").fetchone()[0] == 0)
+t = token(path="/records/new"); c.post("/records/new", data={"_csrf": t, "type": "prospect", "company": "Again", "stage": "Lead"})
+t = token(path="/admin/delete-data")
+r = c.post("/admin/delete-data", data={"_csrf": t, "scope": "all", "confirm": "DELETE", "password": "NewSecret2026x"}, follow_redirects=True)
+check("delete everything", b"Deleted 1 record" in r.data and crm.connect().execute("SELECT COUNT(*) FROM records").fetchone()[0] == 0)
+check("users + settings survive delete", crm.connect().execute("SELECT COUNT(*) FROM users").fetchone()[0] >= 3)
+check("deletes are audit-logged", crm.connect().execute("SELECT COUNT(*) FROM audit_log WHERE action IN ('delete_data','delete_data_denied')").fetchone()[0] >= 4)
+for pth in ["/", "/reports", "/records?type=prospect", "/records?type=client", "/admin/delete-data"]:
+    check(f"pages render with empty database {pth}", c.get(pth).status_code == 200)
+
 print("backend:", "PostgreSQL" if crm.USE_PG else "SQLite")
 print("\nFAILED:" if fails else "\nALL PASSED", fails)

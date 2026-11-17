@@ -29,8 +29,11 @@
       <datalist id="dl-region">{% for v in distinct('region') %}<option value="{{ v }}">{% endfor %}</datalist></div>
     <div><label for="source">Lead source</label>
       <input id="source" name="source" type="text" maxlength="80" value="{{ rec.source or '' }}" placeholder="Referral, website, event…"></div>
-    <div><label for="value"><span data-only="prospect">Expected value</span><span data-only="client">Deal value</span></label>
+    <div><label for="value"><span data-only="prospect">Expected value (INR ₹)</span><span data-only="client">Deal value (INR ₹)</span></label>
       <input id="value" name="value" type="text" inputmode="decimal" value="{{ rec.value if rec.value is not none else '' }}"></div>
+    <div><label for="value_usd"><span data-only="prospect">Expected value (USD $)</span><span data-only="client">Deal value (USD $)</span></label>
+      <input id="value_usd" name="value_usd" type="text" inputmode="decimal" value="{{ rec.value_usd if rec.value_usd is not none else '' }}">
+      <div class="hint">Enter each amount in its own currency – nothing is converted.</div></div>
 
     <div data-only="prospect"><label for="stage">Stage *</label>
       <select id="stage" name="stage" data-defaults='{{ DEFAULT_PROB | tojson }}'>

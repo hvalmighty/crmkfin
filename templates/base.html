@@ -22,6 +22,7 @@
     <a href="{{ url_for('users') }}" class="{{ 'on' if ep in ('users','user_new','user_edit') }}">Users</a>
     <a href="{{ url_for('settings') }}" class="{{ 'on' if ep == 'settings' }}">Settings</a>
     <a href="{{ url_for('audit_view') }}" class="{{ 'on' if ep == 'audit_view' }}">Activity</a>
+    <a href="{{ url_for('danger_zone') }}" class="{{ 'on' if ep == 'danger_zone' }}">Delete data</a>
     {% endif %}
   </nav>
   <div class="me">

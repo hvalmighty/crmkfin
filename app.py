@@ -109,7 +109,7 @@ def schema_statements():
             contact_name TEXT, email TEXT, phone TEXT, owner TEXT, source TEXT,
             presales_lead TEXT, region TEXT,
             stage TEXT, probability INTEGER, expected_close TEXT,
-            value {real},
+            value {real}, value_usd {real},
             closed_date TEXT, closed_quarter TEXT,
             notes TEXT,
             created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
@@ -256,7 +256,8 @@ def password_problem(pw, username=""):
     return None
 
 
-NEW_RECORD_COLUMNS = ("presales_lead", "region")
+NEW_RECORD_COLUMNS = {"presales_lead": "TEXT", "region": "TEXT",
+                      "value_usd": "DOUBLE PRECISION" if USE_PG else "REAL"}
 
 
 def migrate(conn):
@@ -267,9 +268,9 @@ def migrate(conn):
             "WHERE table_name='records' AND table_schema=current_schema()")}
     else:
         have = {r["name"] for r in conn.execute("PRAGMA table_info(records)")}
-    for col in NEW_RECORD_COLUMNS:
+    for col, typ in NEW_RECORD_COLUMNS.items():
         if col not in have:
-            conn.execute(f"ALTER TABLE records ADD COLUMN {col} TEXT")
+            conn.execute(f"ALTER TABLE records ADD COLUMN {col} {typ}")
 
 
 def init_db():
@@ -390,9 +391,12 @@ def parse_money(v):
     if v in (None, ""):
         return None
     if isinstance(v, str):
-        s = re.sub(r"[^\d.\-]", "", v)
-        if not s:
-            return None
+        raw = v.strip()
+        if raw.lower() in ("", "-", "--", "—", "n/a", "na", "nil", "tbd", "none"):
+            return None   # common ways of writing "no amount"
+        s = re.sub(r"[^\d.\-]", "", raw)
+        if not re.search(r"\d", s):
+            raise ValueError("not a number")   # e.g. "abc" - don't silently drop it
         v = s
     n = float(v)
     if n < 0:
@@ -435,7 +439,8 @@ def normalize(raw, kind, fy_start=1):
             errors.append(f"{label}: {msg}" if not msg.startswith("could not") else f"{label}: not a number")
             return None
 
-    d["value"] = safe(parse_money, "value", "Value")
+    d["value"] = safe(parse_money, "value", "Value (INR)")
+    d["value_usd"] = safe(parse_money, "value_usd", "Value (USD)")
     if kind == "prospect":
         d["stage"] = safe(parse_stage, "stage", "Stage") or "Lead"
         prob = safe(parse_prob, "probability", "Probability")
@@ -460,7 +465,7 @@ def normalize(raw, kind, fy_start=1):
 
 COLS = ["type", "company", "contact_name", "email", "phone", "owner", "presales_lead", "region",
         "source", "stage",
-        "probability", "expected_close", "value", "closed_date", "closed_quarter", "notes"]
+        "probability", "expected_close", "value", "value_usd", "closed_date", "closed_quarter", "notes"]
 
 
 INSERT_SQL = (f"INSERT INTO records ({','.join(COLS)},created_at,updated_at,created_by,updated_by) "
@@ -489,7 +494,13 @@ HEADER_ALIASES = {
     "source": ["source", "lead source"],
     "notes": ["notes", "remarks", "comments", "note"],
     "value": ["value", "deal value", "expected value", "amount", "deal size", "revenue",
-              "order value", "deal amount"],
+              "order value", "deal amount",
+              "value (inr)", "deal value (inr)", "expected value (inr)", "amount (inr)", "value inr",
+              "deal value inr", "expected value inr", "amount inr", "inr", "inr value", "amount in inr",
+              "value in inr", "expected value in inr", "deal value in inr", "₹"],
+    "value_usd": ["value (usd)", "deal value (usd)", "expected value (usd)", "amount (usd)", "value usd",
+                  "deal value usd", "expected value usd", "amount usd", "usd", "usd value", "amount in usd",
+                  "value in usd", "expected value in usd", "deal value in usd", "$"],
     "type": ["type", "record type", "category"],
     "presales_lead": ["presales lead", "pre-sales lead", "pre sales lead", "presales", "pre-sales",
                       "presales owner", "presales engineer", "presales consultant", "presales resource",
@@ -650,10 +661,10 @@ def style_header(ws, widths):
 
 PROSPECT_HEADERS = ["Company*", "Contact Name", "Email", "Phone", "Owner", "Presales Lead",
                     "Region / Country", "Source", "Stage",
-                    "Probability (%)", "Expected Close Date", "Expected Value", "Notes"]
+                    "Probability (%)", "Expected Close Date", "Expected Value (INR)", "Expected Value (USD)", "Notes"]
 CLIENT_HEADERS = ["Company*", "Contact Name", "Email", "Phone", "Owner", "Presales Lead",
                   "Region / Country", "Source",
-                  "Closed Date", "Closed Quarter", "Deal Value", "Notes"]
+                  "Closed Date", "Closed Quarter", "Deal Value (INR)", "Deal Value (USD)", "Notes"]
 
 
 def build_template():
@@ -665,6 +676,7 @@ def build_template():
         "",
         "Fill the 'Prospects' sheet for open opportunities and the 'Clients' sheet for converted customers.",
         "Keep the header row. Columns marked * are required. Delete nothing but the data rows you do not need.",
+        "Amounts: put the rupee amount in the (INR) column and the dollar amount in the (USD) column. Either can be left blank; nothing is converted.",
         "Region / Country and Presales Lead are free text - spell them the same way every time (India, UAE, USA...) so reports group correctly.",
         "",
         f"Prospects - Stage must be one of: {', '.join(STAGES)} (blank = Lead).",
@@ -680,7 +692,7 @@ def build_template():
     info.column_dimensions["A"].width = 110
     ws = wb.create_sheet("Prospects")
     ws.append(PROSPECT_HEADERS)
-    style_header(ws, [28, 22, 28, 16, 16, 18, 18, 16, 14, 14, 20, 16, 40])
+    style_header(ws, [28, 22, 28, 16, 16, 18, 18, 16, 14, 14, 20, 20, 20, 40])
     dv = DataValidation(type="list", formula1='"' + ",".join(STAGES) + '"', allow_blank=True)
     ws.add_data_validation(dv)
     dv.add("I2:I2000")
@@ -688,7 +700,7 @@ def build_template():
         ws.cell(row=r, column=11).number_format = "DD-MM-YYYY"
     ws2 = wb.create_sheet("Clients")
     ws2.append(CLIENT_HEADERS)
-    style_header(ws2, [28, 22, 28, 16, 16, 18, 18, 16, 16, 16, 16, 40])
+    style_header(ws2, [28, 22, 28, 16, 16, 18, 18, 16, 16, 16, 18, 18, 40])
     for r in range(2, 2001):
         ws2.cell(row=r, column=9).number_format = "DD-MM-YYYY"
     out = io.BytesIO()
@@ -705,15 +717,15 @@ def build_export(conn):
     for r in conn.execute("SELECT * FROM records WHERE type='prospect' ORDER BY lower(company)"):
         ws.append([xl_safe(x) for x in (
             r["company"], r["contact_name"], r["email"], r["phone"], r["owner"], r["presales_lead"],
-            r["region"], r["source"], r["stage"], r["probability"], r["expected_close"], r["value"], r["notes"])])
-    style_header(ws, [28, 22, 28, 16, 16, 18, 18, 16, 14, 14, 20, 16, 40])
+            r["region"], r["source"], r["stage"], r["probability"], r["expected_close"], r["value"], r["value_usd"], r["notes"])])
+    style_header(ws, [28, 22, 28, 16, 16, 18, 18, 16, 14, 14, 20, 20, 20, 40])
     ws2 = wb.create_sheet("Clients")
     ws2.append(CLIENT_HEADERS)
     for r in conn.execute("SELECT * FROM records WHERE type='client' ORDER BY lower(company)"):
         ws2.append([xl_safe(x) for x in (
             r["company"], r["contact_name"], r["email"], r["phone"], r["owner"], r["presales_lead"],
-            r["region"], r["source"], r["closed_date"], r["closed_quarter"], r["value"], r["notes"])])
-    style_header(ws2, [28, 22, 28, 16, 16, 18, 18, 16, 16, 16, 16, 40])
+            r["region"], r["source"], r["closed_date"], r["closed_quarter"], r["value"], r["value_usd"], r["notes"])])
+    style_header(ws2, [28, 22, 28, 16, 16, 18, 18, 16, 16, 16, 18, 18, 40])
     out = io.BytesIO()
     wb.save(out)
     out.seek(0)
@@ -724,13 +736,15 @@ def build_export(conn):
 def funnel(conn):
     rows = {r["stage"]: r for r in conn.execute(
         "SELECT stage, COUNT(*) c, COALESCE(SUM(value),0) v, "
-        "COALESCE(SUM(value*probability/100.0),0) w FROM records "
+        "COALESCE(SUM(value*probability/100.0),0) w, COALESCE(SUM(value_usd),0) vu, "
+        "COALESCE(SUM(value_usd*probability/100.0),0) wu FROM records "
         "WHERE type='prospect' GROUP BY stage")}
     out = []
     for st in OPEN_STAGES:
         r = rows.get(st)
         out.append({"stage": st, "count": r["c"] if r else 0,
-                    "value": r["v"] if r else 0, "weighted": r["w"] if r else 0})
+                    "value": r["v"] if r else 0, "weighted": r["w"] if r else 0,
+                    "value_usd": r["vu"] if r else 0, "weighted_usd": r["wu"] if r else 0})
     lost = rows.get("Lost")
     return out, (lost["c"] if lost else 0)
 
@@ -739,9 +753,10 @@ def dashboard_data(conn, cfg):
     fy = int(cfg["fy_start_month"])
     stages, lost = funnel(conn)
     today = datetime.now(TZ).date()
-    clients = conn.execute("SELECT COUNT(*) c, COALESCE(SUM(value),0) v FROM records WHERE type='client'").fetchone()
+    clients = conn.execute("SELECT COUNT(*) c, COALESCE(SUM(value),0) v, COALESCE(SUM(value_usd),0) vu "
+                           "FROM records WHERE type='client'").fetchone()
     cur_q = quarter_label(today, fy)
-    won_q = conn.execute("SELECT COUNT(*) c, COALESCE(SUM(value),0) v FROM records "
+    won_q = conn.execute("SELECT COUNT(*) c, COALESCE(SUM(value),0) v, COALESCE(SUM(value_usd),0) vu FROM records "
                          "WHERE type='client' AND closed_quarter=?", (cur_q,)).fetchone()
     open_n = sum(s["count"] for s in stages)
     total = clients["c"] + lost
@@ -756,7 +771,8 @@ def dashboard_data(conn, cfg):
     return {
         "stages": stages, "lost": lost, "open_n": open_n,
         "pipeline": sum(s["value"] for s in stages), "weighted": sum(s["weighted"] for s in stages),
-        "clients": clients["c"], "won_value": clients["v"],
+        "clients": clients["c"], "won_value": clients["v"], "won_value_usd": clients["vu"],
+        "pipeline_usd": sum(s["value_usd"] for s in stages), "weighted_usd": sum(s["weighted_usd"] for s in stages),
         "win_rate": round(100 * clients["c"] / total) if total else None,
         "cur_q": cur_q, "won_q": won_q, "overdue": overdue, "upcoming": upcoming,
         "no_date": no_date, "max_count": max([s["count"] for s in stages] + [1]),
@@ -767,29 +783,35 @@ def breakdown(conn, field):
     """Pipeline + client summary grouped by a free-text field, ignoring upper/lower-case differences."""
     assert field in ("region", "presales_lead")
     groups = {}
-    for r in conn.execute(f"SELECT {field} f, type, stage, value, probability FROM records").fetchall():
+    for r in conn.execute(f"SELECT {field} f, type, stage, value, value_usd, probability FROM records").fetchall():
         label = (r["f"] or "").strip()
-        g = groups.setdefault(label.lower(), {"names": {}, "open_n": 0, "open_value": 0.0, "weighted": 0.0,
-                                              "clients": 0, "won_value": 0.0, "lost": 0})
+        grp = groups.setdefault(label.lower(), {
+            "names": {}, "open_n": 0, "open_value": 0.0, "weighted": 0.0, "open_value_usd": 0.0,
+            "weighted_usd": 0.0, "clients": 0, "won_value": 0.0, "won_value_usd": 0.0, "lost": 0})
         if label:
-            g["names"][label] = g["names"].get(label, 0) + 1
-        val = r["value"] or 0
+            grp["names"][label] = grp["names"].get(label, 0) + 1
+        inr, usd, prob = r["value"] or 0, r["value_usd"] or 0, (r["probability"] or 0) / 100
         if r["type"] == "client":
-            g["clients"] += 1
-            g["won_value"] += val
+            grp["clients"] += 1
+            grp["won_value"] += inr
+            grp["won_value_usd"] += usd
         elif r["stage"] == "Lost":
-            g["lost"] += 1
+            grp["lost"] += 1
         else:
-            g["open_n"] += 1
-            g["open_value"] += val
-            g["weighted"] += val * (r["probability"] or 0) / 100
+            grp["open_n"] += 1
+            grp["open_value"] += inr
+            grp["open_value_usd"] += usd
+            grp["weighted"] += inr * prob
+            grp["weighted_usd"] += usd * prob
     out = []
-    for key, g in groups.items():
-        decided = g["clients"] + g["lost"]
-        out.append({"name": max(g["names"], key=g["names"].get) if g["names"] else "(not set)",
-                    "open_n": g["open_n"], "open_value": g["open_value"], "weighted": g["weighted"],
-                    "clients": g["clients"], "won_value": g["won_value"], "lost": g["lost"],
-                    "win_rate": round(100 * g["clients"] / decided) if decided else None,
+    for key, grp in groups.items():
+        decided = grp["clients"] + grp["lost"]
+        out.append({"name": max(grp["names"], key=grp["names"].get) if grp["names"] else "(not set)",
+                    "open_n": grp["open_n"], "open_value": grp["open_value"], "weighted": grp["weighted"],
+                    "open_value_usd": grp["open_value_usd"], "weighted_usd": grp["weighted_usd"],
+                    "clients": grp["clients"], "won_value": grp["won_value"],
+                    "won_value_usd": grp["won_value_usd"], "lost": grp["lost"],
+                    "win_rate": round(100 * grp["clients"] / decided) if decided else None,
                     "unset": key == ""})
     out.sort(key=lambda x: (x["unset"], -(x["open_value"] + x["won_value"]), x["name"].lower()))
     return out
@@ -805,22 +827,26 @@ def distinct_values(field):
 def report_data(conn, cfg):
     fy = int(cfg["fy_start_month"])
     won = conn.execute(
-        "SELECT COALESCE(closed_quarter,'(no quarter)') q, COUNT(*) c, COALESCE(SUM(value),0) v "
+        "SELECT COALESCE(closed_quarter,'(no quarter)') q, COUNT(*) c, COALESCE(SUM(value),0) v, "
+        "COALESCE(SUM(value_usd),0) vu "
         "FROM records WHERE type='client' GROUP BY 1 ORDER BY 1 DESC").fetchall()
     forecast = {}
-    for r in conn.execute("SELECT expected_close, value, probability FROM records "
+    for r in conn.execute("SELECT expected_close, value, value_usd, probability FROM records "
                           "WHERE type='prospect' AND stage!='Lost'"):
         if r["expected_close"]:
             q = quarter_label(date.fromisoformat(r["expected_close"]), fy)
         else:
             q = "(no date)"
-        f = forecast.setdefault(q, {"q": q, "c": 0, "v": 0.0, "w": 0.0})
+        f = forecast.setdefault(q, {"q": q, "c": 0, "v": 0.0, "w": 0.0, "vu": 0.0, "wu": 0.0})
         f["c"] += 1
         f["v"] += r["value"] or 0
         f["w"] += (r["value"] or 0) * (r["probability"] or 0) / 100
+        f["vu"] += r["value_usd"] or 0
+        f["wu"] += (r["value_usd"] or 0) * (r["probability"] or 0) / 100
     by_owner = conn.execute(
         "SELECT COALESCE(owner,'(unassigned)') o, COUNT(*) c, COALESCE(SUM(value),0) v, "
-        "COALESCE(SUM(value*probability/100.0),0) w FROM records "
+        "COALESCE(SUM(value*probability/100.0),0) w, COALESCE(SUM(value_usd),0) vu, "
+        "COALESCE(SUM(value_usd*probability/100.0),0) wu FROM records "
         "WHERE type='prospect' AND stage!='Lost' GROUP BY 1 ORDER BY 3 DESC").fetchall()
     by_source = conn.execute(
         "SELECT COALESCE(source,'(unknown)') s, "
@@ -879,9 +905,18 @@ def fmt_money(v, cur="₹"):
     return f"{cur}{(v or 0):,.0f}"
 
 
+def fmt_amt(inr, usd):
+    parts = []
+    if inr:
+        parts.append(fmt_money(inr, "₹"))
+    if usd:
+        parts.append(fmt_money(usd, "$"))
+    return " / ".join(parts) or "-"
+
+
 def build_reminder(conn, cfg):
     today = datetime.now(TZ).date()
-    cur = cfg["currency"]
+    cur = "₹"
     rows = conn.execute(
         "SELECT * FROM records WHERE type='prospect' AND stage!='Lost' "
         "ORDER BY CASE WHEN expected_close IS NULL THEN 1 ELSE 0 END, expected_close, lower(company)"
@@ -892,21 +927,24 @@ def build_reminder(conn, cfg):
     t = [f"{cfg['company_name']} - weekly prospect reminder ({today.strftime('%d %b %Y')})", "",
          "FUNNEL"]
     for s in stages:
-        t.append(f"  {s['stage']:<12} {s['count']:>3}   {fmt_money(s['value'], cur)}   (weighted {fmt_money(s['weighted'], cur)})")
+        t.append(f"  {s['stage']:<12} {s['count']:>3}   {fmt_money(s['value'], cur)} / {fmt_money(s['value_usd'], '$')}   "
+                 f"(weighted {fmt_money(s['weighted'], cur)} / {fmt_money(s['weighted_usd'], '$')})")
     t += ["", f"OPEN PROSPECTS ({len(rows)})"]
     h = [f"<h2 style='margin:0 0 8px'>{e(cfg['company_name'])} - weekly prospect reminder</h2>",
          f"<p style='color:#555'>{today.strftime('%A, %d %B %Y')}</p>",
          "<table cellpadding='6' cellspacing='0' style='border-collapse:collapse;font:14px Arial'>"
          "<tr style='background:#1f3a5f;color:#fff'><th align='left'>Stage</th><th>Count</th>"
-         "<th align='right'>Value</th><th align='right'>Weighted</th></tr>"]
+         "<th align='right'>Value (INR)</th><th align='right'>Weighted (INR)</th>"
+         "<th align='right'>Value (USD)</th><th align='right'>Weighted (USD)</th></tr>"]
     for s in stages:
         h.append(f"<tr style='border-bottom:1px solid #ddd'><td>{s['stage']}</td><td align='center'>{s['count']}</td>"
-                 f"<td align='right'>{fmt_money(s['value'], cur)}</td><td align='right'>{fmt_money(s['weighted'], cur)}</td></tr>")
+                 f"<td align='right'>{fmt_money(s['value'], cur)}</td><td align='right'>{fmt_money(s['weighted'], cur)}</td>"
+                 f"<td align='right'>{fmt_money(s['value_usd'], '$')}</td><td align='right'>{fmt_money(s['weighted_usd'], '$')}</td></tr>")
     h.append("</table><h3 style='margin:20px 0 6px'>Open prospects</h3>"
              "<table cellpadding='6' cellspacing='0' style='border-collapse:collapse;font:13px Arial;width:100%'>"
              "<tr style='background:#1f3a5f;color:#fff'><th align='left'>Company</th><th align='left'>Contact</th>"
              "<th align='left'>Stage</th><th>Prob.</th><th align='left'>Expected close</th>"
-             "<th align='right'>Value</th><th align='left'>Owner</th><th align='left'>Presales</th>"
+             "<th align='right'>Value (INR / USD)</th><th align='left'>Owner</th><th align='left'>Presales</th>"
              "<th align='left'>Region</th></tr>")
     for r in rows:
         flag = ""
@@ -915,12 +953,12 @@ def build_reminder(conn, cfg):
         elif not r["expected_close"]:
             flag = " [no date]"
         t.append(f"  - {r['company']} | {r['contact_name'] or '-'} | {r['stage']} | {r['probability']}% | "
-                 f"{fmt_date(r['expected_close'])}{flag} | {fmt_money(r['value'], cur)} | {r['owner'] or '-'} | "
+                 f"{fmt_date(r['expected_close'])}{flag} | {fmt_amt(r['value'], r['value_usd'])} | {r['owner'] or '-'} | "
                  f"presales: {r['presales_lead'] or '-'} | {r['region'] or '-'}")
         color = "#b42318" if "OVERDUE" in flag else "#333"
         h.append(f"<tr style='border-bottom:1px solid #eee;color:{color}'><td>{e(r['company'])}</td>"
                  f"<td>{e(r['contact_name'] or '-')}</td><td>{e(r['stage'])}</td><td align='center'>{r['probability']}%</td>"
-                 f"<td>{fmt_date(r['expected_close'])}{e(flag)}</td><td align='right'>{fmt_money(r['value'], cur)}</td>"
+                 f"<td>{fmt_date(r['expected_close'])}{e(flag)}</td><td align='right'>{fmt_amt(r['value'], r['value_usd'])}</td>"
                  f"<td>{e(r['owner'] or '-')}</td><td>{e(r['presales_lead'] or '-')}</td>"
                  f"<td>{e(r['region'] or '-')}</td></tr>")
     if not rows:
@@ -1041,7 +1079,12 @@ def _fdate(s):
 
 @app.template_filter("money")
 def _money(v):
-    return fmt_money(v, g.cfg["currency"] if getattr(g, "cfg", None) else "₹")
+    return fmt_money(v, "₹")
+
+
+@app.template_filter("usd")
+def _usd(v):
+    return fmt_money(v, "$")
 
 
 @app.before_request
@@ -1247,7 +1290,7 @@ def save_from_form(rid=None):
     raw = {k: request.form.get(k) for k in
            ("company", "contact_name", "email", "phone", "owner", "presales_lead", "region", "source",
             "stage", "probability",
-            "expected_close", "value", "closed_date", "closed_quarter", "notes")}
+            "expected_close", "value", "value_usd", "closed_date", "closed_quarter", "notes")}
     d, errors = normalize(raw, kind, int(g.cfg["fy_start_month"]))
     if errors:
         for e in errors:
@@ -1501,6 +1544,38 @@ def settings():
 def audit_view():
     rows = g.db.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT 200").fetchall()
     return render_template("audit.html", rows=rows)
+
+
+# ---- admin: delete data
+DELETE_SCOPES = {"prospects": ("prospect",), "clients": ("client",), "all": ("prospect", "client")}
+
+
+@app.route("/admin/delete-data", methods=["GET", "POST"])
+@admin_required
+def danger_zone():
+    def counts():
+        rows = {r["type"]: r["n"] for r in g.db.execute("SELECT type, COUNT(*) n FROM records GROUP BY type")}
+        return {"prospects": rows.get("prospect", 0), "clients": rows.get("client", 0)}
+
+    if request.method == "POST":
+        scope = request.form.get("scope", "")
+        if scope not in DELETE_SCOPES:
+            abort(400)
+        if request.form.get("confirm", "").strip() != "DELETE":
+            flash("Nothing deleted - type DELETE (capital letters) to confirm.", "error")
+        elif not check_password_hash(g.user["password_hash"], request.form.get("password", "")):
+            audit(g.db, g.user["username"], "delete_data_denied", f"scope={scope}: wrong password")
+            g.db.commit()
+            flash("Nothing deleted - your admin password was incorrect.", "error")
+        else:
+            kinds = DELETE_SCOPES[scope]
+            n = sum(counts()["prospects" if k == "prospect" else "clients"] for k in kinds)
+            g.db.execute(f"DELETE FROM records WHERE type IN ({','.join('?' * len(kinds))})", kinds)
+            audit(g.db, g.user["username"], "delete_data", f"scope={scope}: {n} record(s) deleted")
+            g.db.commit()
+            flash(f"Deleted {n} record(s) ({scope}).", "ok")
+            return redirect(url_for("danger_zone"))
+    return render_template("danger.html", n=counts())
 
 
 # ---- Vercel Cron (runs daily; sends only on the admin's chosen weekday)

@@ -4,7 +4,7 @@ Flask app. Runs on **Vercel + Postgres** (recommended), or on your own PC/server
 
 ## Features
 - **Secure login** (Login ID + password): hashed passwords, CSRF protection, 5-failure lockout (15 min), session timeout, forced password change at first login, security headers.
-- **Admin controls everything**: add / disable users, reset passwords, unlock accounts, set reminder e-mail IDs and weekday, quarter convention, view the activity log, and delete records. Regular users can add/edit records, import/export and see reports.
+- **Admin controls everything**: add / disable users, reset passwords, unlock accounts, set reminder e-mail IDs and weekday, quarter convention, view the activity log, and delete records (single records, or everything via **Delete data** with a typed confirmation + password). Regular users can add/edit records, import/export and see reports.
 - **Prospects**: stage (Lead → Qualified → Proposal → Negotiation, or Lost), probability %, likely closure date, expected value.
 - **Clients (converted)**: closed date (quarter derived automatically) or just a closed quarter, deal value. One-click *Convert* from a prospect.
 - **Excel upload** (`Prospects` and `Clients` sheets, or one sheet with a `Type` column): downloadable template, validation, dry-run option, row-by-row error report. **Excel export** of everything.
@@ -70,10 +70,10 @@ Keep **one worker** (set in `gunicorn.conf.py`) when using SQLite and the built-
 Download the template from **Import / Export**.
 | Sheet | Columns |
 |---|---|
-| Prospects | Company*, Contact Name, Email, Phone, Owner, Presales Lead, Region / Country, Source, Stage, Probability (%), Expected Close Date, Expected Value, Notes |
-| Clients | Company*, Contact Name, Email, Phone, Owner, Presales Lead, Region / Country, Source, Closed Date, Closed Quarter, Deal Value, Notes |
+| Prospects | Company*, Contact Name, Email, Phone, Owner, Presales Lead, Region / Country, Source, Stage, Probability (%), Expected Close Date, Expected Value (INR), Expected Value (USD), Notes |
+| Clients | Company*, Contact Name, Email, Phone, Owner, Presales Lead, Region / Country, Source, Closed Date, Closed Quarter, Deal Value (INR), Deal Value (USD), Notes |
 
-Region / Country and Presales Lead are free text (older files without them still import). Dates are read as DD-MM-YYYY. Existing records are matched on **Company + E-mail** and updated; others are added. Bad rows are reported and skipped, good rows still import.
+Each amount goes in its own currency column (nothing is converted); region / country and presales lead are free text (older files without them still import). Dates are read as DD-MM-YYYY. Existing records are matched on **Company + E-mail** and updated; others are added. Bad rows are reported and skipped, good rows still import.
 
 ## Tests
 ```bash

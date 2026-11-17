@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Delete data{% endblock %}
+{% block content %}
+<h1>Delete data</h1>
+<p class="sub">Admin only. Deleting cannot be undone – <a href="{{ url_for('download_export') }}">download a backup (.xlsx)</a> first. User accounts, settings and the activity log are never deleted here.</p>
+
+{% for scope, title, text, count in [
+  ('prospects', 'Delete all prospects', 'Removes every prospect (including Lost ones).', n.prospects),
+  ('clients', 'Delete all clients', 'Removes every converted client.', n.clients),
+  ('all', 'Delete everything', 'Removes all prospects and all clients.', n.prospects + n.clients)] %}
+<form method="post" class="card" style="max-width:640px;border-color:#f1c0bb"
+      data-confirm="{{ title }} ({{ count }} record(s))? This cannot be undone.">
+  <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+  <input type="hidden" name="scope" value="{{ scope }}">
+  <h2 style="color:var(--bad)">{{ title }} <span class="muted" style="font-weight:400">· {{ count }} record(s)</span></h2>
+  <p class="muted" style="margin-top:0">{{ text }}</p>
+  <div class="form-grid">
+    <div><label>Type DELETE to confirm</label><input name="confirm" type="text" autocomplete="off" required></div>
+    <div><label>Your admin password</label><input name="password" type="password" autocomplete="current-password" required></div>
+  </div>
+  <div class="bar" style="margin:14px 0 0"><button class="danger" type="submit" {{ 'disabled' if count == 0 }}>{{ title }}</button>
+    {% if count == 0 %}<span class="muted">Nothing to delete.</span>{% endif %}</div>
+</form>
+{% endfor %}
+{% endblock %}

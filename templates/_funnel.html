@@ -3,7 +3,7 @@
   <div class="row">
     <div><span class="pill {{ s.stage }}">{{ s.stage }}</span></div>
     <div class="track"><div class="fill" style="width: {{ [ (100 * s.count / d.max_count) | round | int, 4 ] | max if s.count else 0 }}%">{{ s.count if s.count }}</div></div>
-    <div class="meta">{{ s.value | money }} <span title="Probability-weighted">· wtd {{ s.weighted | money }}</span></div>
+    <div class="meta">{{ s.value | money }} <span title="Probability-weighted">· wtd {{ s.weighted | money }}</span><br>{{ s.value_usd | usd }} <span title="Probability-weighted">· wtd {{ s.weighted_usd | usd }}</span></div>
   </div>
   {% endfor %}
 </div>

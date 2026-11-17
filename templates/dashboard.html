@@ -9,10 +9,10 @@
 
 <div class="grid kpis">
   <div class="kpi"><div class="n">{{ d.open_n }}</div><div class="l">Open prospects</div></div>
-  <div class="kpi"><div class="n">{{ d.pipeline | money }}</div><div class="l">Pipeline value</div></div>
-  <div class="kpi"><div class="n">{{ d.weighted | money }}</div><div class="l">Weighted forecast</div></div>
-  <div class="kpi"><div class="n">{{ d.clients }}</div><div class="l">Clients · {{ d.won_value | money }}</div></div>
-  <div class="kpi"><div class="n">{{ d.won_q.c }}</div><div class="l">Won in {{ d.cur_q }} · {{ d.won_q.v | money }}</div></div>
+  <div class="kpi"><div class="n">{{ d.pipeline | money }}</div><div class="l">Pipeline (INR) · {{ d.pipeline_usd | usd }} USD</div></div>
+  <div class="kpi"><div class="n">{{ d.weighted | money }}</div><div class="l">Weighted (INR) · {{ d.weighted_usd | usd }} USD</div></div>
+  <div class="kpi"><div class="n">{{ d.clients }}</div><div class="l">Clients · {{ d.won_value | money }} · {{ d.won_value_usd | usd }}</div></div>
+  <div class="kpi"><div class="n">{{ d.won_q.c }}</div><div class="l">Won in {{ d.cur_q }} · {{ d.won_q.v | money }} · {{ d.won_q.vu | usd }}</div></div>
   <div class="kpi"><div class="n">{{ (d.win_rate ~ '%') if d.win_rate is not none else '–' }}</div><div class="l">Win rate (clients ÷ clients + lost)</div></div>
 </div>
 
@@ -31,7 +31,7 @@
       <tr><th>Company</th><th>Stage</th><th>Was due</th><th class="r">Value</th></tr>
       {% for r in d.overdue[:8] %}
       <tr class="overdue"><td><a href="{{ url_for('record_edit', rid=r.id) }}">{{ r.company }}</a></td>
-        <td>{{ r.stage }}</td><td>{{ r.expected_close | fdate }}</td><td class="r">{{ r.value | money }}</td></tr>
+        <td>{{ r.stage }}</td><td>{{ r.expected_close | fdate }}</td><td class="r">{{ r.value | money }}{% if r.value_usd %}<br><span class="muted">{{ r.value_usd | usd }}</span>{% endif %}</td></tr>
       {% endfor %}
     </table></div>
     {% if d.overdue | length > 8 %}<p class="muted">+ {{ d.overdue | length - 8 }} more in Prospects.</p>{% endif %}
@@ -44,7 +44,7 @@
       <tr><th>Company</th><th>Stage</th><th>Expected</th><th class="c">Prob.</th><th class="r">Value</th></tr>
       {% for r in d.upcoming[:8] %}
       <tr><td><a href="{{ url_for('record_edit', rid=r.id) }}">{{ r.company }}</a></td><td>{{ r.stage }}</td>
-        <td>{{ r.expected_close | fdate }}</td><td class="c">{{ r.probability }}%</td><td class="r">{{ r.value | money }}</td></tr>
+        <td>{{ r.expected_close | fdate }}</td><td class="c">{{ r.probability }}%</td><td class="r">{{ r.value | money }}{% if r.value_usd %}<br><span class="muted">{{ r.value_usd | usd }}</span>{% endif %}</td></tr>
       {% endfor %}
     </table></div>
     {% else %}<p class="empty">No closures expected in the next 30 days.</p>{% endif %}
