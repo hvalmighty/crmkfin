@@ -1,0 +1,9 @@
+instance/
+venv/
+.venv/
+tests/
+.env
+*.db
+*.db-wal
+*.db-shm
+secret.key

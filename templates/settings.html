@@ -11,8 +11,14 @@
       <input name="reminder_emails" type="text" value="{{ g.cfg.reminder_emails }}" placeholder="sales.head@company.com, you@company.com"></div>
     <div><label>Day of week</label>
       <select name="reminder_day">{% for d in DAYS %}<option value="{{ loop.index0 }}" {{ 'selected' if g.cfg.reminder_day == loop.index0 | string }}>{{ d }}</option>{% endfor %}</select></div>
+    {% if ON_VERCEL %}
+    <div><label>Send time</label>
+      <p class="hint" style="margin:6px 0 0">Set by the cron schedule in <code>vercel.json</code> (default 09:00 IST). The weekday is chosen here.</p>
+      <input type="hidden" name="reminder_hour" value="{{ g.cfg.reminder_hour }}"></div>
+    {% else %}
     <div><label>Send at (hour, {{ tz }})</label>
       <select name="reminder_hour">{% for h in range(24) %}<option value="{{ h }}" {{ 'selected' if g.cfg.reminder_hour == h | string }}>{{ '%02d:00' % h }}</option>{% endfor %}</select></div>
+    {% endif %}
     <div class="span2 check"><input type="checkbox" id="en" name="reminder_enabled" value="1" {{ 'checked' if g.cfg.reminder_enabled == '1' }}>
       <label for="en" style="margin:0;font-weight:500">Weekly reminder enabled</label></div>
   </div>

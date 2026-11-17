@@ -18,6 +18,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from email.message import EmailMessage
 from functools import wraps
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
 from flask import (Flask, abort, flash, g, redirect, render_template, request,
@@ -31,9 +32,29 @@ log = logging.getLogger("crm")
 logging.basicConfig(level=logging.INFO)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ON_VERCEL = bool(os.environ.get("VERCEL"))
+
+
+def clean_db_url(url):
+    """Drop connection-string options libpq does not understand (e.g. Supabase's `supa`)."""
+    p = urlsplit(url)
+    q = [(k, v) for k, v in parse_qsl(p.query, keep_blank_values=True) if k != "supa"]
+    return urlunsplit(p._replace(query=urlencode(q)))
+
+
+# DATABASE_URL (or POSTGRES_URL, set by Vercel's Neon/Supabase integrations) -> PostgreSQL.
+# Without it the app uses a local SQLite file (fine for a PC or a single server).
+DATABASE_URL = clean_db_url(os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL") or "")
+USE_PG = bool(DATABASE_URL)
+if USE_PG:
+    import psycopg
+if ON_VERCEL and not USE_PG:
+    raise RuntimeError("DATABASE_URL is not set. Vercel needs a hosted Postgres database "
+                       "(add Neon from the Vercel Marketplace) - see README.")
 DATA_DIR = os.environ.get("CRM_DATA_DIR") or os.path.join(BASE_DIR, "instance")
-os.makedirs(DATA_DIR, exist_ok=True)
 DB_PATH = os.path.join(DATA_DIR, "crm.db")
+MAX_IMPORT_ROWS = int(os.environ.get("CRM_IMPORT_MAX_ROWS", "5000"))
+LIKE_OP = "ILIKE" if USE_PG else "LIKE"
 TZ = ZoneInfo(os.environ.get("CRM_TIMEZONE", "Asia/Kolkata"))
 
 STAGES = ["Lead", "Qualified", "Proposal", "Negotiation", "Lost"]
@@ -63,42 +84,45 @@ SETTING_DEFAULTS = {
     "reminder_status": "",
 }
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT NOT NULL UNIQUE COLLATE NOCASE,
-    email TEXT,
-    password_hash TEXT NOT NULL,
-    role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('admin','user')),
-    active INTEGER NOT NULL DEFAULT 1,
-    must_change INTEGER NOT NULL DEFAULT 1,
-    pw_version INTEGER NOT NULL DEFAULT 0,
-    failed_attempts INTEGER NOT NULL DEFAULT 0,
-    locked_until TEXT,
-    created_at TEXT NOT NULL,
-    last_login TEXT
-);
-CREATE TABLE IF NOT EXISTS records (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    type TEXT NOT NULL CHECK (type IN ('prospect','client')),
-    company TEXT NOT NULL,
-    contact_name TEXT, email TEXT, phone TEXT, owner TEXT, source TEXT,
-    stage TEXT, probability INTEGER, expected_close TEXT,
-    value REAL,
-    closed_date TEXT, closed_quarter TEXT,
-    notes TEXT,
-    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-    created_by INTEGER, updated_by INTEGER
-);
-CREATE INDEX IF NOT EXISTS idx_records_type ON records(type);
-CREATE INDEX IF NOT EXISTS idx_records_company ON records(company COLLATE NOCASE);
-CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
-CREATE TABLE IF NOT EXISTS audit_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts TEXT NOT NULL, username TEXT, action TEXT NOT NULL, detail TEXT
-);
-"""
-
+def schema_statements():
+    pk = "SERIAL PRIMARY KEY" if USE_PG else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    real = "DOUBLE PRECISION" if USE_PG else "REAL"
+    uname = "TEXT NOT NULL" if USE_PG else "TEXT NOT NULL UNIQUE COLLATE NOCASE"
+    stmts = [
+        f"""CREATE TABLE IF NOT EXISTS users (
+            id {pk},
+            username {uname},
+            email TEXT,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('admin','user')),
+            active INTEGER NOT NULL DEFAULT 1,
+            must_change INTEGER NOT NULL DEFAULT 1,
+            pw_version INTEGER NOT NULL DEFAULT 0,
+            failed_attempts INTEGER NOT NULL DEFAULT 0,
+            locked_until TEXT,
+            created_at TEXT NOT NULL,
+            last_login TEXT)""",
+        f"""CREATE TABLE IF NOT EXISTS records (
+            id {pk},
+            type TEXT NOT NULL CHECK (type IN ('prospect','client')),
+            company TEXT NOT NULL,
+            contact_name TEXT, email TEXT, phone TEXT, owner TEXT, source TEXT,
+            stage TEXT, probability INTEGER, expected_close TEXT,
+            value {real},
+            closed_date TEXT, closed_quarter TEXT,
+            notes TEXT,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            created_by INTEGER, updated_by INTEGER)""",
+        "CREATE INDEX IF NOT EXISTS idx_records_type ON records(type)",
+        "CREATE INDEX IF NOT EXISTS idx_records_company_lc ON records(lower(company))",
+        "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)",
+        f"""CREATE TABLE IF NOT EXISTS audit_log (
+            id {pk},
+            ts TEXT NOT NULL, username TEXT, action TEXT NOT NULL, detail TEXT)""",
+    ]
+    if USE_PG:
+        stmts.append("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_lc ON users (lower(username))")
+    return stmts
 
 # --------------------------------------------------------------------------- helpers
 def utcnow():
@@ -113,6 +137,10 @@ def load_secret_key():
     key = os.environ.get("CRM_SECRET_KEY")
     if key:
         return key
+    if ON_VERCEL:
+        raise RuntimeError("CRM_SECRET_KEY environment variable must be set on Vercel "
+                           "(any long random string).")
+    os.makedirs(DATA_DIR, exist_ok=True)
     path = os.path.join(DATA_DIR, "secret.key")
     if not os.path.exists(path):
         try:
@@ -125,12 +153,79 @@ def load_secret_key():
         return f.read().strip()
 
 
+class Row:
+    """Row that supports row["col"], row[0], row.keys() and dict(row) - like sqlite3.Row."""
+    __slots__ = ("_cols", "_vals")
+
+    def __init__(self, cols, vals):
+        self._cols, self._vals = cols, tuple(vals)
+
+    def __getitem__(self, k):
+        if isinstance(k, str):
+            try:
+                return self._vals[self._cols.index(k)]
+            except ValueError:
+                raise KeyError(k) from None
+        return self._vals[k]
+
+    def keys(self):
+        return list(self._cols)
+
+    def __iter__(self):
+        return iter(self._vals)
+
+    def __len__(self):
+        return len(self._vals)
+
+
+def _pg_row_factory(cursor):
+    cols = [c.name for c in (cursor.description or [])]
+    return lambda values: Row(cols, values)
+
+
+class DB:
+    """Thin wrapper so the rest of the code can use `?` placeholders on SQLite and PostgreSQL."""
+
+    def __init__(self, conn):
+        self.conn = conn
+
+    @staticmethod
+    def _pg(sql):
+        return sql.replace("%", "%%").replace("?", "%s")
+
+    def execute(self, sql, params=()):
+        if USE_PG:
+            sql = self._pg(sql)
+        return self.conn.execute(sql, params)
+
+    def executemany(self, sql, rows):
+        if USE_PG:
+            with self.conn.cursor() as cur:
+                cur.executemany(self._pg(sql), rows)
+        else:
+            self.conn.executemany(sql, rows)
+
+    def commit(self):
+        self.conn.commit()
+
+    def rollback(self):
+        self.conn.rollback()
+
+    def close(self):
+        self.conn.close()
+
+
 def connect():
+    if USE_PG:
+        # prepare_threshold=None: works behind pgbouncer / Neon's pooled connection string.
+        return DB(psycopg.connect(DATABASE_URL, row_factory=_pg_row_factory,
+                                  prepare_threshold=None, connect_timeout=15))
+    os.makedirs(DATA_DIR, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA journal_mode=WAL")
-    return conn
+    return DB(conn)
 
 
 def get_settings(conn):
@@ -162,9 +257,12 @@ def password_problem(pw, username=""):
 
 def init_db():
     conn = connect()
-    conn.executescript(SCHEMA)
+    if USE_PG:   # serialise concurrent cold starts
+        conn.execute("SELECT pg_advisory_xact_lock(7242026)")
+    for stmt in schema_statements():
+        conn.execute(stmt)
     for k, v in SETTING_DEFAULTS.items():
-        conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (k, v))
+        conn.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO NOTHING", (k, v))
     if not conn.execute("SELECT 1 FROM users").fetchone():
         username = os.environ.get("CRM_ADMIN_USER", "admin")
         pw = os.environ.get("CRM_ADMIN_PASSWORD")
@@ -344,19 +442,19 @@ COLS = ["type", "company", "contact_name", "email", "phone", "owner", "source", 
         "probability", "expected_close", "value", "closed_date", "closed_quarter", "notes"]
 
 
+INSERT_SQL = (f"INSERT INTO records ({','.join(COLS)},created_at,updated_at,created_by,updated_by) "
+              f"VALUES ({','.join('?' * len(COLS))},?,?,?,?)")
+UPDATE_SQL = f"UPDATE records SET {','.join(c + '=?' for c in COLS)}, updated_at=?, updated_by=? WHERE id=?"
+
+
 def insert_record(conn, d, uid):
     now = iso(utcnow())
-    cur = conn.execute(
-        f"INSERT INTO records ({','.join(COLS)},created_at,updated_at,created_by,updated_by) "
-        f"VALUES ({','.join('?' * len(COLS))},?,?,?,?)",
-        [d.get(c) for c in COLS] + [now, now, uid, uid])
-    return cur.lastrowid
+    cur = conn.execute(INSERT_SQL + " RETURNING id", [d.get(c) for c in COLS] + [now, now, uid, uid])
+    return cur.fetchone()[0]
 
 
 def update_record(conn, rid, d, uid):
-    sets = ",".join(f"{c}=?" for c in COLS)
-    conn.execute(f"UPDATE records SET {sets}, updated_at=?, updated_by=? WHERE id=?",
-                 [d.get(c) for c in COLS] + [iso(utcnow()), uid, rid])
+    conn.execute(UPDATE_SQL, [d.get(c) for c in COLS] + [iso(utcnow()), uid, rid])
 
 
 # --------------------------------------------------------------------------- Excel import/export
@@ -432,6 +530,12 @@ def row_kind(v):
 def import_workbook(conn, fileobj, fy_start, update_existing, dry_run, uid):
     wb = load_workbook(fileobj, read_only=True, data_only=True)
     res = {"created": 0, "updated": 0, "skipped": 0, "errors": [], "sheets": []}
+    # One lookup up front + batched writes at the end: keeps imports fast on a remote database.
+    known = {}
+    for r in conn.execute("SELECT id, type, company, email FROM records"):
+        known[(r["type"], (r["company"] or "").lower(), (r["email"] or "").lower())] = r["id"]
+    inserts, updates, total_rows, limit_hit = [], [], 0, False
+    now = iso(utcnow())
     for ws in wb.worksheets:
         name, low = ws.title, ws.title.lower()
         if low in ("instructions", "readme", "help", "notes"):
@@ -454,10 +558,13 @@ def import_workbook(conn, fileobj, fy_start, update_existing, dry_run, uid):
                                                      "'Clients', or add a 'Type' column - sheet skipped"))
                     break
                 continue
-            if stats["rows"] >= 20000:
-                res["errors"].append((name, idx, "Row limit (20,000) reached - remaining rows ignored"))
+            if total_rows >= MAX_IMPORT_ROWS:
+                res["errors"].append((name, idx, f"Row limit ({MAX_IMPORT_ROWS:,} per upload) reached - "
+                                                 "remaining rows ignored; upload them in a second file"))
+                limit_hit = True
                 break
             stats["rows"] += 1
+            total_rows += 1
             raw = {colmap[i]: row[i] for i in colmap if i < len(row)}
             k = kind or row_kind(raw.get("type"))
             if not k:
@@ -467,22 +574,31 @@ def import_workbook(conn, fileobj, fy_start, update_existing, dry_run, uid):
             if errs:
                 res["errors"].append((name, idx, "; ".join(errs)))
                 continue
-            existing = conn.execute(
-                "SELECT id FROM records WHERE type=? AND lower(company)=lower(?) "
-                "AND lower(COALESCE(email,''))=lower(?)", (k, d["company"], d["email"] or "")).fetchone()
-            if existing:
-                if update_existing:
-                    update_record(conn, existing["id"], d, uid)
-                    res["updated"] += 1
-                else:
+            key = (k, d["company"].lower(), (d["email"] or "").lower())
+            if key in known:
+                rid = known[key]
+                if rid is None:
+                    res["errors"].append((name, idx, "Duplicate of an earlier row in this file - skipped"))
+                    continue
+                if not update_existing:
                     res["skipped"] += 1
                     continue
+                updates.append([d.get(c) for c in COLS] + [now, uid, rid])
+                res["updated"] += 1
             else:
-                insert_record(conn, d, uid)
+                inserts.append([d.get(c) for c in COLS] + [now, now, uid, uid])
+                known[key] = None
                 res["created"] += 1
             stats["ok"] += 1
         res["sheets"].append(stats)
+        if limit_hit:
+            break
     wb.close()
+    if not dry_run:
+        if inserts:
+            conn.executemany(INSERT_SQL, inserts)
+        if updates:
+            conn.executemany(UPDATE_SQL, updates)
     return res
 
 
@@ -557,14 +673,14 @@ def build_export(conn):
     ws = wb.active
     ws.title = "Prospects"
     ws.append(PROSPECT_HEADERS)
-    for r in conn.execute("SELECT * FROM records WHERE type='prospect' ORDER BY company COLLATE NOCASE"):
+    for r in conn.execute("SELECT * FROM records WHERE type='prospect' ORDER BY lower(company)"):
         ws.append([xl_safe(x) for x in (
             r["company"], r["contact_name"], r["email"], r["phone"], r["owner"], r["source"],
             r["stage"], r["probability"], r["expected_close"], r["value"], r["notes"])])
     style_header(ws, [28, 22, 28, 16, 16, 16, 14, 14, 20, 16, 40])
     ws2 = wb.create_sheet("Clients")
     ws2.append(CLIENT_HEADERS)
-    for r in conn.execute("SELECT * FROM records WHERE type='client' ORDER BY company COLLATE NOCASE"):
+    for r in conn.execute("SELECT * FROM records WHERE type='client' ORDER BY lower(company)"):
         ws2.append([xl_safe(x) for x in (
             r["company"], r["contact_name"], r["email"], r["phone"], r["owner"], r["source"],
             r["closed_date"], r["closed_quarter"], r["value"], r["notes"])])
@@ -622,7 +738,7 @@ def report_data(conn, cfg):
     fy = int(cfg["fy_start_month"])
     won = conn.execute(
         "SELECT COALESCE(closed_quarter,'(no quarter)') q, COUNT(*) c, COALESCE(SUM(value),0) v "
-        "FROM records WHERE type='client' GROUP BY q ORDER BY q DESC").fetchall()
+        "FROM records WHERE type='client' GROUP BY 1 ORDER BY 1 DESC").fetchall()
     forecast = {}
     for r in conn.execute("SELECT expected_close, value, probability FROM records "
                           "WHERE type='prospect' AND stage!='Lost'"):
@@ -637,11 +753,12 @@ def report_data(conn, cfg):
     by_owner = conn.execute(
         "SELECT COALESCE(owner,'(unassigned)') o, COUNT(*) c, COALESCE(SUM(value),0) v, "
         "COALESCE(SUM(value*probability/100.0),0) w FROM records "
-        "WHERE type='prospect' AND stage!='Lost' GROUP BY o ORDER BY v DESC").fetchall()
+        "WHERE type='prospect' AND stage!='Lost' GROUP BY 1 ORDER BY 3 DESC").fetchall()
     by_source = conn.execute(
         "SELECT COALESCE(source,'(unknown)') s, "
         "SUM(CASE WHEN type='prospect' AND stage!='Lost' THEN 1 ELSE 0 END) p, "
-        "SUM(CASE WHEN type='client' THEN 1 ELSE 0 END) c FROM records GROUP BY s ORDER BY (p+c) DESC").fetchall()
+        "SUM(CASE WHEN type='client' THEN 1 ELSE 0 END) c FROM records GROUP BY 1").fetchall()
+    by_source = sorted(by_source, key=lambda r: (-(r["p"] + r["c"]), r["s"]))
     return {"won": won, "forecast": sorted(forecast.values(), key=lambda x: x["q"]),
             "by_owner": by_owner, "by_source": by_source}
 
@@ -698,7 +815,7 @@ def build_reminder(conn, cfg):
     cur = cfg["currency"]
     rows = conn.execute(
         "SELECT * FROM records WHERE type='prospect' AND stage!='Lost' "
-        "ORDER BY CASE WHEN expected_close IS NULL THEN 1 ELSE 0 END, expected_close, company COLLATE NOCASE"
+        "ORDER BY CASE WHEN expected_close IS NULL THEN 1 ELSE 0 END, expected_close, lower(company)"
     ).fetchall()
     stages, _ = funnel(conn)
     e = htmllib.escape
@@ -753,12 +870,14 @@ def send_reminder_now(conn):
     return len(recipients)
 
 
-def maybe_send_weekly(conn):
+def maybe_send_weekly(conn, ignore_hour=False):
     cfg = get_settings(conn)
     if cfg["reminder_enabled"] != "1" or not parse_emails(cfg["reminder_emails"]):
         return
     now = datetime.now(TZ)
-    if now.weekday() != int(cfg["reminder_day"]) or now.hour < int(cfg["reminder_hour"]):
+    if now.weekday() != int(cfg["reminder_day"]):
+        return
+    if not ignore_hour and now.hour < int(cfg["reminder_hour"]):
         return
     today = now.date().isoformat()
     if cfg["reminder_last_attempt"] == today:
@@ -797,8 +916,8 @@ _scheduler_started = False
 
 def start_scheduler():
     global _scheduler_started
-    if os.environ.get("CRM_DISABLE_SCHEDULER") == "1":
-        return
+    if ON_VERCEL or os.environ.get("CRM_DISABLE_SCHEDULER") == "1":
+        return   # serverless: Vercel Cron calls /api/cron/reminders instead
     with _scheduler_lock:
         if _scheduler_started:
             return
@@ -808,16 +927,28 @@ def start_scheduler():
 
 
 # --------------------------------------------------------------------------- Flask app
-app = Flask(__name__)
+app = Flask(__name__, static_folder="public", static_url_path="")
 app.config.update(
     SECRET_KEY=load_secret_key(),
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
-    SESSION_COOKIE_SECURE=os.environ.get("CRM_SECURE_COOKIES") == "1",
+    SESSION_COOKIE_SECURE=os.environ.get("CRM_SECURE_COOKIES") == "1" or ON_VERCEL,
     PERMANENT_SESSION_LIFETIME=timedelta(hours=int(os.environ.get("CRM_SESSION_HOURS", "8"))),
-    MAX_CONTENT_LENGTH=5 * 1024 * 1024,
+    MAX_CONTENT_LENGTH=4 * 1024 * 1024,   # Vercel rejects bodies over 4.5 MB
 )
-init_db()
+_inited = False
+
+
+def ensure_init():
+    """Create tables / first admin once per process (lazily on Vercel, at startup elsewhere)."""
+    global _inited
+    if not _inited:
+        init_db()
+        _inited = True
+
+
+if not ON_VERCEL:
+    ensure_init()
 
 
 def csrf_token():
@@ -827,7 +958,7 @@ def csrf_token():
 
 
 app.jinja_env.globals.update(csrf_token=csrf_token, STAGES=STAGES, OPEN_STAGES=OPEN_STAGES,
-                             DAYS=DAYS, DEFAULT_PROB=DEFAULT_PROB)
+                             DAYS=DAYS, DEFAULT_PROB=DEFAULT_PROB, ON_VERCEL=ON_VERCEL)
 
 
 @app.template_filter("fdate")
@@ -848,6 +979,7 @@ def before():
         sent = request.form.get("_csrf", "")
         if not sent or not secrets.compare_digest(sent, session.get("_csrf", "")):
             abort(400)
+    ensure_init()
     g.db = connect()
     g.cfg = get_settings(g.db)
     g.user = None
@@ -912,7 +1044,7 @@ def admin_required(f):
 
 for code, msg in {400: "Bad request or expired form - please go back and retry.",
                   403: "You do not have permission to do that.",
-                  404: "Page not found.", 413: "File too large (limit 5 MB).",
+                  404: "Page not found.", 413: "File too large (limit 4 MB).",
                   500: "Something went wrong."}.items():
     app.register_error_handler(code, lambda e, code=code, msg=msg: (
         render_template("error.html", code=code, msg=msg), code))
@@ -926,7 +1058,7 @@ def login():
     if request.method == "POST":
         username = request.form.get("username", "").strip()
         pw = request.form.get("password", "")
-        user = g.db.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
+        user = g.db.execute("SELECT * FROM users WHERE lower(username)=lower(?)", (username,)).fetchone()
         now = utcnow()
         locked = bool(user and user["locked_until"] and datetime.fromisoformat(user["locked_until"]) > now)
         ok = bool(user) and check_password_hash(user["password_hash"] if user else
@@ -1018,7 +1150,7 @@ def records():
     page = max(request.args.get("page", 1, type=int), 1)
     where, args = ["type=?"], [kind]
     if q:
-        where.append("(company LIKE ? OR contact_name LIKE ? OR email LIKE ? OR owner LIKE ?)")
+        where.append(f"(company {LIKE_OP} ? OR contact_name {LIKE_OP} ? OR email {LIKE_OP} ? OR owner {LIKE_OP} ?)")
         args += [f"%{q}%"] * 4
     if kind == "prospect" and stage in STAGES:
         where.append("stage=?")
@@ -1027,8 +1159,8 @@ def records():
         where.append("stage!='Lost'")
     w = " AND ".join(where)
     total = g.db.execute(f"SELECT COUNT(*) FROM records WHERE {w}", args).fetchone()[0]
-    order = ("CASE WHEN expected_close IS NULL THEN 1 ELSE 0 END, expected_close, company COLLATE NOCASE"
-             if kind == "prospect" else "closed_date DESC, company COLLATE NOCASE")
+    order = ("CASE WHEN expected_close IS NULL THEN 1 ELSE 0 END, expected_close, lower(company)"
+             if kind == "prospect" else "closed_date DESC NULLS LAST, lower(company)")
     rows = g.db.execute(f"SELECT * FROM records WHERE {w} ORDER BY {order} LIMIT ? OFFSET ?",
                         args + [PAGE_SIZE, (page - 1) * PAGE_SIZE]).fetchall()
     pages = max((total + PAGE_SIZE - 1) // PAGE_SIZE, 1)
@@ -1183,7 +1315,7 @@ def user_new():
         err = None
         if not USERNAME_RE.match(username):
             err = "Username must be 3-40 characters: letters, numbers and . _ @ -"
-        elif g.db.execute("SELECT 1 FROM users WHERE username=?", (username,)).fetchone():
+        elif g.db.execute("SELECT 1 FROM users WHERE lower(username)=lower(?)", (username,)).fetchone():
             err = "That username already exists."
         elif email and not EMAIL_RE.match(email):
             err = "Invalid e-mail address."
@@ -1296,6 +1428,17 @@ def audit_view():
     return render_template("audit.html", rows=rows)
 
 
+# ---- Vercel Cron (runs daily; sends only on the admin's chosen weekday)
+@app.route("/api/cron/reminders")
+def cron_reminders():
+    secret = os.environ.get("CRON_SECRET", "")
+    sent = request.headers.get("Authorization", "")
+    if not secret or not secrets.compare_digest(sent.encode(), f"Bearer {secret}".encode()):
+        return "Unauthorized", 401
+    maybe_send_weekly(g.db, ignore_hour=True)   # cron timing is only hour-accurate on some plans
+    return {"ok": True, "status": get_settings(g.db)["reminder_status"]}
+
+
 # ---- CLI helpers
 @app.cli.command("send-reminders")
 def cli_send_reminders():
@@ -1316,7 +1459,7 @@ def cli_reset_password():
         raise click.ClickException(problem)
     conn = connect()
     cur = conn.execute("UPDATE users SET password_hash=?, must_change=1, active=1, failed_attempts=0, "
-                       "locked_until=NULL, pw_version=pw_version+1 WHERE username=?",
+                       "locked_until=NULL, pw_version=pw_version+1 WHERE lower(username)=lower(?)",
                        (generate_password_hash(pw), username))
     conn.commit()
     print("Password reset." if cur.rowcount else "No such user.")
