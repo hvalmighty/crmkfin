@@ -1562,7 +1562,7 @@ def danger_zone():
         if scope not in DELETE_SCOPES:
             abort(400)
         if request.form.get("confirm", "").strip() != "DELETE":
-            flash("Nothing deleted - type DELETE (capital letters) to confirm.", "error")
+            flash("Nothing deleted - type the word DELETE (capital letters) in the confirmation box.", "error")
         elif not check_password_hash(g.user["password_hash"], request.form.get("password", "")):
             audit(g.db, g.user["username"], "delete_data_denied", f"scope={scope}: wrong password")
             g.db.commit()

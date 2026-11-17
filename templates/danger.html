@@ -4,22 +4,24 @@
 <h1>Delete data</h1>
 <p class="sub">Admin only. Deleting cannot be undone – <a href="{{ url_for('download_export') }}">download a backup (.xlsx)</a> first. User accounts, settings and the activity log are never deleted here.</p>
 
-{% for scope, title, text, count in [
-  ('prospects', 'Delete all prospects', 'Removes every prospect (including Lost ones).', n.prospects),
-  ('clients', 'Delete all clients', 'Removes every converted client.', n.clients),
-  ('all', 'Delete everything', 'Removes all prospects and all clients.', n.prospects + n.clients)] %}
-<form method="post" class="card" style="max-width:640px;border-color:#f1c0bb"
-      data-confirm="{{ title }} ({{ count }} record(s))? This cannot be undone.">
+<form method="post" class="card" style="max-width:640px;border-color:#f1c0bb">
   <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-  <input type="hidden" name="scope" value="{{ scope }}">
-  <h2 style="color:var(--bad)">{{ title }} <span class="muted" style="font-weight:400">· {{ count }} record(s)</span></h2>
-  <p class="muted" style="margin-top:0">{{ text }}</p>
+
+  <h2 style="color:var(--bad)">Step 1 – choose what to delete</h2>
+  <p class="check"><input type="radio" id="s-prospects" name="scope" value="prospects" required>
+    <label for="s-prospects" style="margin:0;font-weight:500">All prospects <span class="muted">({{ n.prospects }} record(s), including Lost)</span></label></p>
+  <p class="check"><input type="radio" id="s-clients" name="scope" value="clients">
+    <label for="s-clients" style="margin:0;font-weight:500">All clients <span class="muted">({{ n.clients }} record(s))</span></label></p>
+  <p class="check"><input type="radio" id="s-all" name="scope" value="all">
+    <label for="s-all" style="margin:0;font-weight:500">Everything – all prospects and all clients <span class="muted">({{ n.prospects + n.clients }} record(s))</span></label></p>
+
+  <h2 style="color:var(--bad);margin-top:20px">Step 2 – confirm</h2>
   <div class="form-grid">
-    <div><label>Type DELETE to confirm</label><input name="confirm" type="text" autocomplete="off" required></div>
-    <div><label>Your admin password</label><input name="password" type="password" autocomplete="current-password" required></div>
+    <div><label for="confirm">Type the word DELETE here (capital letters)</label>
+      <input id="confirm" name="confirm" type="text" autocomplete="off" placeholder="DELETE" required></div>
+    <div><label for="password">Your admin password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required></div>
   </div>
-  <div class="bar" style="margin:14px 0 0"><button class="danger" type="submit" {{ 'disabled' if count == 0 }}>{{ title }}</button>
-    {% if count == 0 %}<span class="muted">Nothing to delete.</span>{% endif %}</div>
+  <div class="bar" style="margin:16px 0 0"><button class="danger" type="submit">Delete permanently</button></div>
 </form>
-{% endfor %}
 {% endblock %}
