@@ -70,10 +70,10 @@ Keep **one worker** (set in `gunicorn.conf.py`) when using SQLite and the built-
 Download the template from **Import / Export**.
 | Sheet | Columns |
 |---|---|
-| Prospects | Company*, Contact Name, Email, Phone, Owner, Source, Stage, Probability (%), Expected Close Date, Expected Value, Notes |
-| Clients | Company*, Contact Name, Email, Phone, Owner, Source, Closed Date, Closed Quarter, Deal Value, Notes |
+| Prospects | Company*, Contact Name, Email, Phone, Owner, Presales Lead, Region / Country, Source, Stage, Probability (%), Expected Close Date, Expected Value, Notes |
+| Clients | Company*, Contact Name, Email, Phone, Owner, Presales Lead, Region / Country, Source, Closed Date, Closed Quarter, Deal Value, Notes |
 
-Dates are read as DD-MM-YYYY. Existing records are matched on **Company + E-mail** and updated; others are added. Bad rows are reported and skipped, good rows still import.
+Region / Country and Presales Lead are free text (older files without them still import). Dates are read as DD-MM-YYYY. Existing records are matched on **Company + E-mail** and updated; others are added. Bad rows are reported and skipped, good rows still import.
 
 ## Tests
 ```bash

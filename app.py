@@ -107,6 +107,7 @@ def schema_statements():
             type TEXT NOT NULL CHECK (type IN ('prospect','client')),
             company TEXT NOT NULL,
             contact_name TEXT, email TEXT, phone TEXT, owner TEXT, source TEXT,
+            presales_lead TEXT, region TEXT,
             stage TEXT, probability INTEGER, expected_close TEXT,
             value {real},
             closed_date TEXT, closed_quarter TEXT,
@@ -255,12 +256,29 @@ def password_problem(pw, username=""):
     return None
 
 
+NEW_RECORD_COLUMNS = ("presales_lead", "region")
+
+
+def migrate(conn):
+    """Add columns introduced after the first release to databases created earlier."""
+    if USE_PG:
+        have = {r[0] for r in conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name='records' AND table_schema=current_schema()")}
+    else:
+        have = {r["name"] for r in conn.execute("PRAGMA table_info(records)")}
+    for col in NEW_RECORD_COLUMNS:
+        if col not in have:
+            conn.execute(f"ALTER TABLE records ADD COLUMN {col} TEXT")
+
+
 def init_db():
     conn = connect()
     if USE_PG:   # serialise concurrent cold starts
         conn.execute("SELECT pg_advisory_xact_lock(7242026)")
     for stmt in schema_statements():
         conn.execute(stmt)
+    migrate(conn)
     for k, v in SETTING_DEFAULTS.items():
         conn.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO NOTHING", (k, v))
     if not conn.execute("SELECT 1 FROM users").fetchone():
@@ -394,6 +412,8 @@ def normalize(raw, kind, fy_start=1):
         errors.append("Company is required")
     d["contact_name"] = clean_text(raw.get("contact_name"), 120)
     d["owner"] = clean_text(raw.get("owner"), 80)
+    d["presales_lead"] = clean_text(raw.get("presales_lead"), 80)
+    d["region"] = clean_text(raw.get("region"), 80)
     d["source"] = clean_text(raw.get("source"), 80)
     d["notes"] = clean_text(raw.get("notes"), 2000)
     email = clean_text(raw.get("email"), 200)
@@ -438,7 +458,8 @@ def normalize(raw, kind, fy_start=1):
     return d, errors
 
 
-COLS = ["type", "company", "contact_name", "email", "phone", "owner", "source", "stage",
+COLS = ["type", "company", "contact_name", "email", "phone", "owner", "presales_lead", "region",
+        "source", "stage",
         "probability", "expected_close", "value", "closed_date", "closed_quarter", "notes"]
 
 
@@ -470,6 +491,11 @@ HEADER_ALIASES = {
     "value": ["value", "deal value", "expected value", "amount", "deal size", "revenue",
               "order value", "deal amount"],
     "type": ["type", "record type", "category"],
+    "presales_lead": ["presales lead", "pre-sales lead", "pre sales lead", "presales", "pre-sales",
+                      "presales owner", "presales engineer", "presales consultant", "presales resource",
+                      "presales spoc", "pre-sales spoc", "presales name"],
+    "region": ["region", "country", "region/country", "region / country", "region or country",
+               "country/region", "country / region", "geo", "geography", "territory", "location"],
 }
 PROSPECT_ALIASES = {
     "stage": ["stage", "pipeline stage", "status"],
@@ -622,9 +648,11 @@ def style_header(ws, widths):
     ws.freeze_panes = "B2"
 
 
-PROSPECT_HEADERS = ["Company*", "Contact Name", "Email", "Phone", "Owner", "Source", "Stage",
+PROSPECT_HEADERS = ["Company*", "Contact Name", "Email", "Phone", "Owner", "Presales Lead",
+                    "Region / Country", "Source", "Stage",
                     "Probability (%)", "Expected Close Date", "Expected Value", "Notes"]
-CLIENT_HEADERS = ["Company*", "Contact Name", "Email", "Phone", "Owner", "Source",
+CLIENT_HEADERS = ["Company*", "Contact Name", "Email", "Phone", "Owner", "Presales Lead",
+                  "Region / Country", "Source",
                   "Closed Date", "Closed Quarter", "Deal Value", "Notes"]
 
 
@@ -637,6 +665,7 @@ def build_template():
         "",
         "Fill the 'Prospects' sheet for open opportunities and the 'Clients' sheet for converted customers.",
         "Keep the header row. Columns marked * are required. Delete nothing but the data rows you do not need.",
+        "Region / Country and Presales Lead are free text - spell them the same way every time (India, UAE, USA...) so reports group correctly.",
         "",
         f"Prospects - Stage must be one of: {', '.join(STAGES)} (blank = Lead).",
         "Prospects - Probability is 0-100 (60 or 60% both work). Blank = default for the stage.",
@@ -651,17 +680,17 @@ def build_template():
     info.column_dimensions["A"].width = 110
     ws = wb.create_sheet("Prospects")
     ws.append(PROSPECT_HEADERS)
-    style_header(ws, [28, 22, 28, 16, 16, 16, 14, 14, 20, 16, 40])
+    style_header(ws, [28, 22, 28, 16, 16, 18, 18, 16, 14, 14, 20, 16, 40])
     dv = DataValidation(type="list", formula1='"' + ",".join(STAGES) + '"', allow_blank=True)
     ws.add_data_validation(dv)
-    dv.add("G2:G2000")
+    dv.add("I2:I2000")
     for r in range(2, 2001):
-        ws.cell(row=r, column=9).number_format = "DD-MM-YYYY"
+        ws.cell(row=r, column=11).number_format = "DD-MM-YYYY"
     ws2 = wb.create_sheet("Clients")
     ws2.append(CLIENT_HEADERS)
-    style_header(ws2, [28, 22, 28, 16, 16, 16, 16, 16, 16, 40])
+    style_header(ws2, [28, 22, 28, 16, 16, 18, 18, 16, 16, 16, 16, 40])
     for r in range(2, 2001):
-        ws2.cell(row=r, column=7).number_format = "DD-MM-YYYY"
+        ws2.cell(row=r, column=9).number_format = "DD-MM-YYYY"
     out = io.BytesIO()
     wb.save(out)
     out.seek(0)
@@ -675,16 +704,16 @@ def build_export(conn):
     ws.append(PROSPECT_HEADERS)
     for r in conn.execute("SELECT * FROM records WHERE type='prospect' ORDER BY lower(company)"):
         ws.append([xl_safe(x) for x in (
-            r["company"], r["contact_name"], r["email"], r["phone"], r["owner"], r["source"],
-            r["stage"], r["probability"], r["expected_close"], r["value"], r["notes"])])
-    style_header(ws, [28, 22, 28, 16, 16, 16, 14, 14, 20, 16, 40])
+            r["company"], r["contact_name"], r["email"], r["phone"], r["owner"], r["presales_lead"],
+            r["region"], r["source"], r["stage"], r["probability"], r["expected_close"], r["value"], r["notes"])])
+    style_header(ws, [28, 22, 28, 16, 16, 18, 18, 16, 14, 14, 20, 16, 40])
     ws2 = wb.create_sheet("Clients")
     ws2.append(CLIENT_HEADERS)
     for r in conn.execute("SELECT * FROM records WHERE type='client' ORDER BY lower(company)"):
         ws2.append([xl_safe(x) for x in (
-            r["company"], r["contact_name"], r["email"], r["phone"], r["owner"], r["source"],
-            r["closed_date"], r["closed_quarter"], r["value"], r["notes"])])
-    style_header(ws2, [28, 22, 28, 16, 16, 16, 16, 16, 16, 40])
+            r["company"], r["contact_name"], r["email"], r["phone"], r["owner"], r["presales_lead"],
+            r["region"], r["source"], r["closed_date"], r["closed_quarter"], r["value"], r["notes"])])
+    style_header(ws2, [28, 22, 28, 16, 16, 18, 18, 16, 16, 16, 16, 40])
     out = io.BytesIO()
     wb.save(out)
     out.seek(0)
@@ -734,6 +763,45 @@ def dashboard_data(conn, cfg):
     }
 
 
+def breakdown(conn, field):
+    """Pipeline + client summary grouped by a free-text field, ignoring upper/lower-case differences."""
+    assert field in ("region", "presales_lead")
+    groups = {}
+    for r in conn.execute(f"SELECT {field} f, type, stage, value, probability FROM records").fetchall():
+        label = (r["f"] or "").strip()
+        g = groups.setdefault(label.lower(), {"names": {}, "open_n": 0, "open_value": 0.0, "weighted": 0.0,
+                                              "clients": 0, "won_value": 0.0, "lost": 0})
+        if label:
+            g["names"][label] = g["names"].get(label, 0) + 1
+        val = r["value"] or 0
+        if r["type"] == "client":
+            g["clients"] += 1
+            g["won_value"] += val
+        elif r["stage"] == "Lost":
+            g["lost"] += 1
+        else:
+            g["open_n"] += 1
+            g["open_value"] += val
+            g["weighted"] += val * (r["probability"] or 0) / 100
+    out = []
+    for key, g in groups.items():
+        decided = g["clients"] + g["lost"]
+        out.append({"name": max(g["names"], key=g["names"].get) if g["names"] else "(not set)",
+                    "open_n": g["open_n"], "open_value": g["open_value"], "weighted": g["weighted"],
+                    "clients": g["clients"], "won_value": g["won_value"], "lost": g["lost"],
+                    "win_rate": round(100 * g["clients"] / decided) if decided else None,
+                    "unset": key == ""})
+    out.sort(key=lambda x: (x["unset"], -(x["open_value"] + x["won_value"]), x["name"].lower()))
+    return out
+
+
+def distinct_values(field):
+    """Existing values, used to suggest consistent spellings in the entry form."""
+    assert field in ("region", "presales_lead", "owner", "source")
+    return [r[0] for r in g.db.execute(
+        f"SELECT DISTINCT {field} FROM records WHERE {field} IS NOT NULL AND {field}<>'' ORDER BY 1")]
+
+
 def report_data(conn, cfg):
     fy = int(cfg["fy_start_month"])
     won = conn.execute(
@@ -760,7 +828,8 @@ def report_data(conn, cfg):
         "SUM(CASE WHEN type='client' THEN 1 ELSE 0 END) c FROM records GROUP BY 1").fetchall()
     by_source = sorted(by_source, key=lambda r: (-(r["p"] + r["c"]), r["s"]))
     return {"won": won, "forecast": sorted(forecast.values(), key=lambda x: x["q"]),
-            "by_owner": by_owner, "by_source": by_source}
+            "by_owner": by_owner, "by_source": by_source,
+            "by_region": breakdown(conn, "region"), "by_presales": breakdown(conn, "presales_lead")}
 
 
 # --------------------------------------------------------------------------- e-mail reminders
@@ -837,7 +906,8 @@ def build_reminder(conn, cfg):
              "<table cellpadding='6' cellspacing='0' style='border-collapse:collapse;font:13px Arial;width:100%'>"
              "<tr style='background:#1f3a5f;color:#fff'><th align='left'>Company</th><th align='left'>Contact</th>"
              "<th align='left'>Stage</th><th>Prob.</th><th align='left'>Expected close</th>"
-             "<th align='right'>Value</th><th align='left'>Owner</th></tr>")
+             "<th align='right'>Value</th><th align='left'>Owner</th><th align='left'>Presales</th>"
+             "<th align='left'>Region</th></tr>")
     for r in rows:
         flag = ""
         if r["expected_close"] and r["expected_close"] < today.isoformat():
@@ -845,15 +915,17 @@ def build_reminder(conn, cfg):
         elif not r["expected_close"]:
             flag = " [no date]"
         t.append(f"  - {r['company']} | {r['contact_name'] or '-'} | {r['stage']} | {r['probability']}% | "
-                 f"{fmt_date(r['expected_close'])}{flag} | {fmt_money(r['value'], cur)} | {r['owner'] or '-'}")
+                 f"{fmt_date(r['expected_close'])}{flag} | {fmt_money(r['value'], cur)} | {r['owner'] or '-'} | "
+                 f"presales: {r['presales_lead'] or '-'} | {r['region'] or '-'}")
         color = "#b42318" if "OVERDUE" in flag else "#333"
         h.append(f"<tr style='border-bottom:1px solid #eee;color:{color}'><td>{e(r['company'])}</td>"
                  f"<td>{e(r['contact_name'] or '-')}</td><td>{e(r['stage'])}</td><td align='center'>{r['probability']}%</td>"
                  f"<td>{fmt_date(r['expected_close'])}{e(flag)}</td><td align='right'>{fmt_money(r['value'], cur)}</td>"
-                 f"<td>{e(r['owner'] or '-')}</td></tr>")
+                 f"<td>{e(r['owner'] or '-')}</td><td>{e(r['presales_lead'] or '-')}</td>"
+                 f"<td>{e(r['region'] or '-')}</td></tr>")
     if not rows:
         t.append("  No open prospects.")
-        h.append("<tr><td colspan='7'>No open prospects.</td></tr>")
+        h.append("<tr><td colspan='9'>No open prospects.</td></tr>")
     h.append("</table><p style='color:#888;font-size:12px'>Sent automatically by your CRM.</p>")
     return subject, "\n".join(t), "".join(h)
 
@@ -958,7 +1030,8 @@ def csrf_token():
 
 
 app.jinja_env.globals.update(csrf_token=csrf_token, STAGES=STAGES, OPEN_STAGES=OPEN_STAGES,
-                             DAYS=DAYS, DEFAULT_PROB=DEFAULT_PROB, ON_VERCEL=ON_VERCEL)
+                             DAYS=DAYS, DEFAULT_PROB=DEFAULT_PROB, ON_VERCEL=ON_VERCEL,
+                             distinct=lambda f: distinct_values(f))
 
 
 @app.template_filter("fdate")
@@ -1150,8 +1223,9 @@ def records():
     page = max(request.args.get("page", 1, type=int), 1)
     where, args = ["type=?"], [kind]
     if q:
-        where.append(f"(company {LIKE_OP} ? OR contact_name {LIKE_OP} ? OR email {LIKE_OP} ? OR owner {LIKE_OP} ?)")
-        args += [f"%{q}%"] * 4
+        where.append("(" + " OR ".join(f"{c} {LIKE_OP} ?" for c in (
+            "company", "contact_name", "email", "owner", "presales_lead", "region")) + ")")
+        args += [f"%{q}%"] * 6
     if kind == "prospect" and stage in STAGES:
         where.append("stage=?")
         args.append(stage)
@@ -1171,7 +1245,8 @@ def records():
 def save_from_form(rid=None):
     kind = "client" if request.form.get("type") == "client" else "prospect"
     raw = {k: request.form.get(k) for k in
-           ("company", "contact_name", "email", "phone", "owner", "source", "stage", "probability",
+           ("company", "contact_name", "email", "phone", "owner", "presales_lead", "region", "source",
+            "stage", "probability",
             "expected_close", "value", "closed_date", "closed_quarter", "notes")}
     d, errors = normalize(raw, kind, int(g.cfg["fy_start_month"]))
     if errors:

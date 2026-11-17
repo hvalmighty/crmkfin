@@ -21,6 +21,12 @@
       <input id="phone" name="phone" type="text" maxlength="30" value="{{ rec.phone or '' }}"></div>
     <div><label for="owner">Sales owner</label>
       <input id="owner" name="owner" type="text" maxlength="80" value="{{ rec.owner or '' }}"></div>
+    <div><label for="presales_lead">Presales lead</label>
+      <input id="presales_lead" name="presales_lead" type="text" maxlength="80" list="dl-presales" value="{{ rec.presales_lead or '' }}">
+      <datalist id="dl-presales">{% for v in distinct('presales_lead') %}<option value="{{ v }}">{% endfor %}</datalist></div>
+    <div><label for="region">Region / Country</label>
+      <input id="region" name="region" type="text" maxlength="80" list="dl-region" value="{{ rec.region or '' }}" placeholder="e.g. India, UAE, USA">
+      <datalist id="dl-region">{% for v in distinct('region') %}<option value="{{ v }}">{% endfor %}</datalist></div>
     <div><label for="source">Lead source</label>
       <input id="source" name="source" type="text" maxlength="80" value="{{ rec.source or '' }}" placeholder="Referral, website, event…"></div>
     <div><label for="value"><span data-only="prospect">Expected value</span><span data-only="client">Deal value</span></label>

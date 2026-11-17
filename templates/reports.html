@@ -48,4 +48,16 @@
     </table></div>{% else %}<p class="empty">No data.</p>{% endif %}
   </div>
 </div>
+{% for title, rows, label in (('By region / country', r.by_region, 'Region / Country'), ('By presales lead', r.by_presales, 'Presales lead')) %}
+<div class="card">
+  <h2>{{ title }}</h2>
+  {% if rows %}<div class="scroll"><table>
+    <tr><th>{{ label }}</th><th class="r">Open prospects</th><th class="r">Pipeline</th><th class="r">Weighted</th><th class="r">Clients</th><th class="r">Won value</th><th class="r">Lost</th><th class="r">Win rate</th></tr>
+    {% for x in rows %}<tr><td>{{ x.name }}</td><td class="r">{{ x.open_n }}</td><td class="r">{{ x.open_value | money }}</td><td class="r">{{ x.weighted | money }}</td>
+      <td class="r">{{ x.clients }}</td><td class="r">{{ x.won_value | money }}</td><td class="r">{{ x.lost }}</td><td class="r">{{ (x.win_rate ~ '%') if x.win_rate is not none else '–' }}</td></tr>{% endfor %}
+  </table></div>
+  <p class="muted" style="margin:8px 0 0;font-size:13px">Win rate = clients ÷ (clients + lost). Spellings that differ only by upper/lower case are grouped together.{% if rows | selectattr('unset') | list %} “(not set)” = records with no {{ label | lower }} filled in.{% endif %}</p>
+  {% else %}<p class="empty">No data.</p>{% endif %}
+</div>
+{% endfor %}
 {% endblock %}

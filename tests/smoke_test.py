@@ -177,5 +177,41 @@ check("re-import is idempotent", n2 == 301, n2)
 for p in ["/", "/reports", "/records?type=client", "/records?type=prospect&page=2"]:
     check(f"page ok after bulk {p}", c.get(p).status_code == 200)
 
+
+# 18. region / presales lead
+t = token(path="/records/new")
+c.post("/records/new", data={"_csrf": t, "type": "prospect", "company": "Gulf Trade", "stage": "Proposal", "value": "200000",
+                             "region": "UAE", "presales_lead": "Anil"}, follow_redirects=True)
+row = crm.connect().execute("SELECT region, presales_lead FROM records WHERE company='Gulf Trade'").fetchone()
+check("form saves region + presales lead", row["region"] == "UAE" and row["presales_lead"] == "Anil", dict(row))
+check("form shows region suggestions", b'value="UAE"' in c.get("/records/new").data)
+wb = Workbook(); ws = wb.active; ws.title = "Prospects"
+ws.append(["Company", "Country", "Pre-sales Lead", "Stage", "Expected Value"])
+ws.append(["RegionCo", "uae", "Priya", "Lead", 1000]); ws.append(["RegionCo2", "Uae ", "Priya", "Qualified", 3000])
+ws.append(["RegionCo3", "India", "anil", "Lead", 500]); ws.append(["RegionCo4", None, None, "Lead", 100])
+bio = io.BytesIO(); wb.save(bio)
+t = token(path="/data")
+r = c.post("/data", data={"_csrf": t, "update_existing": "1", "file": (io.BytesIO(bio.getvalue()), "r.xlsx")}, content_type="multipart/form-data")
+check("import accepts Country + Pre-sales Lead headers", b"Import complete" in r.data and b"No 'Company'" not in r.data)
+row = crm.connect().execute("SELECT region, presales_lead FROM records WHERE company='RegionCo'").fetchone()
+check("imported region/presales values", row["region"] == "uae" and row["presales_lead"] == "Priya", dict(row))
+bd = {x["name"].lower(): x for x in crm.breakdown(crm.connect(), "region")}
+check("region report groups UAE/uae/'Uae ' together", bd["uae"]["open_n"] == 3 and bd["uae"]["open_value"] == 204000, bd.get("uae"))
+check("unset region shown last as (not set)", crm.breakdown(crm.connect(), "region")[-1]["name"] == "(not set)")
+pb = {x["name"].lower(): x for x in crm.breakdown(crm.connect(), "presales_lead")}
+check("presales report groups Anil/anil", pb["anil"]["open_n"] >= 2, pb.get("anil"))
+rep = c.get("/reports").get_data(as_text=True)
+check("reports page has region + presales sections", "By region / country" in rep and "By presales lead" in rep and "UAE" in rep)
+check("search finds by region", b"Gulf Trade" in c.get("/records?type=prospect&q=uae").data)
+check("lists show new columns", b"Presales lead" in c.get("/records?type=prospect").data and b"Region" in c.get("/records?type=client").data)
+tw = load_workbook(io.BytesIO(c.get("/template.xlsx").data))
+check("template has new columns", "Region / Country" in [x.value for x in tw["Prospects"][1]] and "Presales Lead" in [x.value for x in tw["Clients"][1]])
+ex = load_workbook(io.BytesIO(c.get("/export.xlsx").data))
+hdr = [x.value for x in ex["Prospects"][1]]
+vals = {r[0].value: r for r in ex["Prospects"].iter_rows(min_row=2)}
+check("export has region/presales in right columns", vals["Gulf Trade"][hdr.index("Region / Country")].value == "UAE" and vals["Gulf Trade"][hdr.index("Presales Lead")].value == "Anil")
+subj, text, html = crm.build_reminder(crm.connect(), crm.get_settings(crm.connect()))
+check("reminder e-mail includes region + presales", "presales: Anil" in text and "Anil" in html and "UAE" in html)
+
 print("backend:", "PostgreSQL" if crm.USE_PG else "SQLite")
 print("\nFAILED:" if fails else "\nALL PASSED", fails)
