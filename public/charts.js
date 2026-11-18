@@ -4,8 +4,8 @@
   if (!el || !window.Chart) return;
   var D = JSON.parse(el.textContent);
 
-  var INK = "#1e2142", MUTED = "#7a7f9d", GRID = "#edeff8";
-  var C = { brand: "#5b5fef", violet: "#8b6cfc", sky: "#38bdf8", teal: "#2dd4bf", amber: "#f59e0b", rose: "#f43f5e", green: "#22c55e", slate: "#b4b9d4" };
+  var INK = "#231a1c", MUTED = "#85787b", GRID = "#f3e9ea";
+  var C = { brand: "#d0202f", violet: "#7f1d1d", sky: "#6b7280", teal: "#f87171", amber: "#f59e0b", rose: "#ef4444", green: "#22a06b", slate: "#d9cfd1" };
   var PAL = [C.brand, C.sky, C.teal, C.amber, C.violet, C.rose, C.green, "#fb923c", "#94a3b8"];
   Chart.defaults.font.family = "'Bai Jamjuree', system-ui, sans-serif";
   Chart.defaults.font.size = 12.5;
@@ -50,7 +50,7 @@
     },
     "c-forecast": function (c) {
       var F = D.forecast;
-      return { type: "bar", data: { labels: F.labels, datasets: [bars("Pipeline", F[c], "#c9ccff"), bars("Weighted", F["w_" + c], C.brand)] },
+      return { type: "bar", data: { labels: F.labels, datasets: [bars("Pipeline", F[c], "#f6c3c8"), bars("Weighted", F["w_" + c], C.brand)] },
         options: { scales: { x: noGrid, y: axisMoney(c) }, plugins: { legend: { position: "bottom" },
           tooltip: moneyTip(c, function (items) { return ["Prospects: " + F.count[items[0].dataIndex]]; }) } } };
     },
@@ -92,7 +92,7 @@
   };
 
   function hbar(S, c) {
-    return { type: "bar", data: { labels: S.labels, datasets: [bars("Pipeline", S[c], "#c9ccff"), bars("Weighted", S["w_" + c], C.brand)] },
+    return { type: "bar", data: { labels: S.labels, datasets: [bars("Pipeline", S[c], "#f6c3c8"), bars("Weighted", S["w_" + c], C.brand)] },
       options: { indexAxis: "y", scales: { x: axisMoney(c), y: noGrid }, plugins: { legend: { position: "bottom" },
         tooltip: hMoneyTip(c, function (items) { return ["Prospects: " + S.n[items[0].dataIndex]]; }) } } };
   }
