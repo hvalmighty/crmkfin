@@ -817,6 +817,214 @@ def breakdown(conn, field):
     return out
 
 
+def _num(v):
+    return float(v or 0)
+
+
+def group_series(items, field, top=8):
+    """Open-pipeline totals grouped by a free-text field (case-insensitive) as chart arrays."""
+    groups = {}
+    for r in items:
+        label = (r[field] or "").strip()
+        gp = groups.setdefault(label.lower(), {"names": {}, "n": 0, "inr": 0.0, "usd": 0.0, "w_inr": 0.0, "w_usd": 0.0})
+        if label:
+            gp["names"][label] = gp["names"].get(label, 0) + 1
+        p = (r["probability"] or 0) / 100
+        gp["n"] += 1
+        gp["inr"] += _num(r["value"])
+        gp["usd"] += _num(r["value_usd"])
+        gp["w_inr"] += _num(r["value"]) * p
+        gp["w_usd"] += _num(r["value_usd"]) * p
+    rows = [dict(gp, label=(max(gp["names"], key=gp["names"].get) if gp["names"] else "(not set)"), unset=(k == ""))
+            for k, gp in groups.items()]
+    ti, tu = sum(x["inr"] for x in rows) or 1, sum(x["usd"] for x in rows) or 1
+    rows.sort(key=lambda x: (x["unset"], -(x["inr"] / ti + x["usd"] / tu), x["label"].lower()))
+    if len(rows) > top:
+        rest = rows[top - 1:]
+        other = {"label": "Other", "n": 0, "inr": 0.0, "usd": 0.0, "w_inr": 0.0, "w_usd": 0.0, "unset": False}
+        for x in rest:
+            for k in ("n", "inr", "usd", "w_inr", "w_usd"):
+                other[k] += x[k]
+        rows = rows[:top - 1] + [other]
+    return {"labels": [x["label"] for x in rows], "n": [x["n"] for x in rows],
+            "inr": [round(x["inr"]) for x in rows], "usd": [round(x["usd"]) for x in rows],
+            "w_inr": [round(x["w_inr"]) for x in rows], "w_usd": [round(x["w_usd"]) for x in rows]}
+
+
+DQ_FIELDS = [("expected_close", "Likely closure date", True, False), ("owner", "Sales owner", True, True),
+             ("presales_lead", "Presales lead", True, True), ("region", "Region / Country", True, True),
+             ("value", "Amount (INR)", True, True), ("value_usd", "Amount (USD)", True, True),
+             ("source", "Lead source", True, True), ("closed_date", "Closed date", False, True)]
+MISSING_FIELDS = tuple(f[0] for f in DQ_FIELDS)
+
+
+def analytics_data(conn, cfg):
+    fy = int(cfg["fy_start_month"])
+    today = datetime.now(TZ).date()
+    now = utcnow()
+    rows = conn.execute(
+        "SELECT id, type, company, stage, probability, expected_close, value, value_usd, closed_date, closed_quarter, "
+        "owner, source, region, presales_lead, created_at, updated_at FROM records").fetchall()
+    prospects = [r for r in rows if r["type"] == "prospect"]
+    opens = [r for r in prospects if r["stage"] != "Lost"]
+    lost = [r for r in prospects if r["stage"] == "Lost"]
+    clients = [r for r in rows if r["type"] == "client"]
+
+    def p(r): return (r["probability"] or 0) / 100
+    def inr(r): return _num(r["value"])
+    def usd(r): return _num(r["value_usd"])
+
+    def age_days(r):
+        try:
+            return max((now - datetime.fromisoformat(r["updated_at"])).days, 0)
+        except (TypeError, ValueError):
+            return 0
+
+    sums = lambda items: {"inr": sum(inr(r) for r in items), "usd": sum(usd(r) for r in items),
+                          "w_inr": sum(inr(r) * p(r) for r in items), "w_usd": sum(usd(r) * p(r) for r in items), "n": len(items)}
+    pipe = sums(opens)
+    today_s = today.isoformat()
+    overdue = [r for r in opens if r["expected_close"] and r["expected_close"] < today_s]
+    stale = sorted([r for r in opens if age_days(r) >= 30], key=age_days, reverse=True)
+    nodate = [r for r in opens if not r["expected_close"]]
+    soon = [r for r in opens if r["expected_close"] and today_s <= r["expected_close"] <= (today + timedelta(days=30)).isoformat()]
+    cur_q = quarter_label(today, fy)
+    won_q = [c for c in clients if c["closed_quarter"] == cur_q]
+    decided = len(clients) + len(lost)
+    win_rate = round(100 * len(clients) / decided) if decided else None
+    n_inr, n_usd = sum(1 for r in opens if r["value"]), sum(1 for r in opens if r["value_usd"])
+
+    # ---- chart data
+    stages = {"labels": OPEN_STAGES, "count": [], "inr": [], "usd": [], "w_inr": [], "w_usd": []}
+    for st in OPEN_STAGES:
+        s = sums([r for r in opens if r["stage"] == st])
+        stages["count"].append(s["n"])
+        for k in ("inr", "usd", "w_inr", "w_usd"):
+            stages[k].append(round(s[k]))
+
+    months = []
+    y, m = today.year, today.month
+    for i in range(6):
+        months.append(date(y + (m - 1 + i) // 12, (m - 1 + i) % 12 + 1, 1))
+    labels = ["Overdue"] + [d.strftime("%b %Y") for d in months] + ["Later", "No date"]
+    fc = {k: [0.0] * len(labels) for k in ("inr", "usd", "w_inr", "w_usd", "count")}
+    for r in opens:
+        if not r["expected_close"]:
+            i = len(labels) - 1
+        else:
+            d = date.fromisoformat(r["expected_close"])
+            diff = (d.year - today.year) * 12 + d.month - today.month
+            i = 0 if d < today else (1 + diff if diff <= 5 else len(labels) - 2)
+        fc["count"][i] += 1
+        fc["inr"][i] += inr(r)
+        fc["usd"][i] += usd(r)
+        fc["w_inr"][i] += inr(r) * p(r)
+        fc["w_usd"][i] += usd(r) * p(r)
+    forecast = {"labels": labels, **{k: [round(v) for v in vs] for k, vs in fc.items()}}
+
+    wq = {}
+    for c in clients:
+        if c["closed_quarter"]:
+            g = wq.setdefault(c["closed_quarter"], {"count": 0, "inr": 0.0, "usd": 0.0})
+            g["count"] += 1
+            g["inr"] += inr(c)
+            g["usd"] += usd(c)
+    qs = sorted(wq)[-8:]
+    won = {"labels": qs, "count": [wq[q]["count"] for q in qs], "inr": [round(wq[q]["inr"]) for q in qs],
+           "usd": [round(wq[q]["usd"]) for q in qs]}
+
+    bands = [("0–25%", 0, 25), ("26–50%", 26, 50), ("51–75%", 51, 75), ("76–100%", 76, 100)]
+    prob = {"labels": [b[0] for b in bands], "count": [], "inr": [], "usd": []}
+    for _, lo, hi in bands:
+        items = [r for r in opens if lo <= (r["probability"] or 0) <= hi]
+        prob["count"].append(len(items))
+        prob["inr"].append(round(sum(inr(r) for r in items)))
+        prob["usd"].append(round(sum(usd(r) for r in items)))
+
+    def band_counts(vals, edges, names):
+        out = [0] * len(names)
+        for v in vals:
+            out[next((i for i, e in enumerate(edges) if v < e), len(edges))] += 1
+        return {"labels": names, "count": out}
+    size = {"inr": band_counts([inr(r) for r in opens if r["value"]], [1e5, 5e5, 1e6, 5e6],
+                               ["< ₹1 L", "₹1–5 L", "₹5–10 L", "₹10–50 L", "₹50 L +"]),
+            "usd": band_counts([usd(r) for r in opens if r["value_usd"]], [1e3, 5e3, 1e4, 5e4],
+                               ["< $1K", "$1–5K", "$5–10K", "$10–50K", "$50K +"])}
+
+    ml = []
+    for i in range(5, -1, -1):
+        mm = today.month - i
+        ml.append(date(today.year + (mm - 1) // 12, (mm - 1) % 12 + 1, 1))
+    key = lambda r: (r["created_at"] or "")[:7]
+    added = {"labels": [d.strftime("%b %y") for d in ml],
+             "prospects": [sum(1 for r in prospects if key(r) == d.strftime("%Y-%m")) for d in ml],
+             "clients": [sum(1 for r in clients if key(r) == d.strftime("%Y-%m")) for d in ml]}
+
+    br = [x for x in breakdown(conn, "region") if x["clients"] + x["lost"] > 0][:8]
+    winrate = {"labels": [x["name"] for x in br], "rate": [x["win_rate"] or 0 for x in br],
+               "won": [x["clients"] for x in br], "lost": [x["lost"] for x in br]}
+
+    region_s, source_s = group_series(opens, "region"), group_series(opens, "source")
+    charts = {"stages": stages, "forecast": forecast, "won": won, "prob": prob, "size": size, "added": added,
+              "winrate": winrate, "region": region_s, "source": source_s,
+              "presales": group_series(opens, "presales_lead"), "owner": group_series(opens, "owner")}
+
+    # ---- lists
+    def row(r, extra=None):
+        d = {k: r[k] for k in ("id", "company", "stage", "probability", "expected_close", "value", "value_usd",
+                               "region", "presales_lead", "owner")}
+        d.update(extra or {})
+        return d
+    top_inr = [row(r) for r in sorted([r for r in opens if r["value"]], key=inr, reverse=True)[:8]]
+    top_usd = [row(r) for r in sorted([r for r in opens if r["value_usd"]], key=usd, reverse=True)[:8]]
+    stale_rows = [row(r, {"days": age_days(r)}) for r in stale[:8]]
+
+    dq = []
+    for field, label, for_p, for_c in DQ_FIELDS:
+        dq.append({"key": field, "label": label,
+                   "p": sum(1 for r in opens if r[field] is None) if for_p else None,
+                   "c": sum(1 for r in clients if r[field] is None) if for_c else None})
+
+    # ---- plain-language highlights
+    hi = []
+    pct = lambda a, b: round(100 * a / b) if b else 0
+    if pipe["n"]:
+        use = "inr" if pipe["inr"] else "usd"
+        hi.append(("info", f"Weighted forecast is {pct(pipe['w_' + use], pipe[use])}% of the open pipeline "
+                           f"({fmt_amt(pipe['w_inr'], pipe['w_usd'])} of {fmt_amt(pipe['inr'], pipe['usd'])})."))
+        vals = sorted((inr(r) if pipe["inr"] else usd(r) for r in opens), reverse=True)
+        if len(vals) >= 4 and sum(vals):
+            share = pct(sum(vals[:3]), sum(vals))
+            hi.append(("warn" if share >= 50 else "info",
+                       f"The top 3 deals make up {share}% of the open pipeline"
+                       + (" – a few slipping would hurt the forecast." if share >= 50 else ".")))
+        rv = region_s["inr"] if pipe["inr"] else region_s["usd"]
+        reg = [(l, v) for l, v in zip(region_s["labels"], rv) if l not in ("(not set)", "Other")]
+        if reg and sum(rv):
+            l, v = max(reg, key=lambda x: x[1])
+            hi.append(("info", f"{l} is the largest region – {pct(v, sum(rv))}% of the open pipeline."))
+    if soon:
+        s = sums(soon)
+        hi.append(("good", f"{len(soon)} prospect(s) are due to close in the next 30 days – weighted {fmt_amt(s['w_inr'], s['w_usd'])}."))
+    if overdue:
+        s = sums(overdue)
+        hi.append(("bad", f"{len(overdue)} open prospect(s) worth {fmt_amt(s['inr'], s['usd'])} are past their expected closure date."))
+    if stale:
+        hi.append(("warn", f"{len(stale)} open prospect(s) haven't been updated in 30+ days."))
+    if nodate:
+        hi.append(("warn", f"{len(nodate)} open prospect(s) have no expected closure date, so they are missing from the forecast."))
+    if win_rate is not None:
+        hi.append(("good" if win_rate >= 50 else "info", f"Win rate is {win_rate}% ({len(clients)} won vs {len(lost)} lost)."))
+
+    return {
+        "pipe": pipe, "open_n": len(opens), "n_inr": n_inr, "n_usd": n_usd,
+        "avg_inr": pipe["inr"] / n_inr if n_inr else 0, "avg_usd": pipe["usd"] / n_usd if n_usd else 0,
+        "won_q": sums(won_q), "cur_q": cur_q, "clients": sums(clients), "lost_n": len(lost), "win_rate": win_rate,
+        "overdue_n": len(overdue), "stale_n": len(stale), "nodate_n": len(nodate),
+        "charts": charts, "top_inr": top_inr, "top_usd": top_usd, "stale": stale_rows, "dq": dq, "highlights": hi,
+    }
+
+
 def distinct_values(field):
     """Existing values, used to suggest consistent spellings in the entry form."""
     assert field in ("region", "presales_lead", "owner", "source")
@@ -901,8 +1109,45 @@ def fmt_date(s):
         return "-"
 
 
+def indian_group(n):
+    """12345678 -> '1,23,45,678' (lakh / crore grouping)."""
+    s = str(abs(int(n)))
+    if len(s) > 3:
+        head, tail, parts = s[:-3], s[-3:], []
+        while len(head) > 2:
+            parts.insert(0, head[-2:])
+            head = head[:-2]
+        if head:
+            parts.insert(0, head)
+        s = ",".join(parts + [tail])
+    return ("-" if n < 0 else "") + s
+
+
 def fmt_money(v, cur="₹"):
-    return f"{cur}{(v or 0):,.0f}"
+    n = int(round(v or 0))
+    return f"₹{indian_group(n)}" if cur == "₹" else f"{cur}{n:,}"
+
+
+def _trim(x):
+    return f"{x:.2f}".rstrip("0").rstrip(".")
+
+
+def fmt_compact(v, cur="₹"):
+    """Short form for KPI tiles: ₹1.25 Cr, ₹45.3 L, $1.2M, $12.5K."""
+    v = float(v or 0)
+    if cur == "₹":
+        if v >= 1e7:
+            return f"₹{_trim(v / 1e7)} Cr"
+        if v >= 1e5:
+            return f"₹{_trim(v / 1e5)} L"
+        return fmt_money(v, "₹")
+    if v >= 1e9:
+        return f"${_trim(v / 1e9)}B"
+    if v >= 1e6:
+        return f"${_trim(v / 1e6)}M"
+    if v >= 1e4:
+        return f"${_trim(v / 1e3)}K"
+    return fmt_money(v, "$")
 
 
 def fmt_amt(inr, usd):
@@ -1069,6 +1314,7 @@ def csrf_token():
 
 app.jinja_env.globals.update(csrf_token=csrf_token, STAGES=STAGES, OPEN_STAGES=OPEN_STAGES,
                              DAYS=DAYS, DEFAULT_PROB=DEFAULT_PROB, ON_VERCEL=ON_VERCEL,
+                             ASSET_V=(os.environ.get("VERCEL_GIT_COMMIT_SHA") or "3")[:8],
                              distinct=lambda f: distinct_values(f))
 
 
@@ -1085,6 +1331,16 @@ def _money(v):
 @app.template_filter("usd")
 def _usd(v):
     return fmt_money(v, "$")
+
+
+@app.template_filter("inr_c")
+def _inr_c(v):
+    return fmt_compact(v, "₹")
+
+
+@app.template_filter("usd_c")
+def _usd_c(v):
+    return fmt_compact(v, "$")
 
 
 @app.before_request
@@ -1241,7 +1497,13 @@ def change_password():
 @app.route("/")
 @login_required
 def dashboard():
-    return render_template("dashboard.html", d=dashboard_data(g.db, g.cfg))
+    return render_template("dashboard.html", d=dashboard_data(g.db, g.cfg), a=analytics_data(g.db, g.cfg))
+
+
+@app.route("/analytics")
+@login_required
+def analytics():
+    return render_template("analytics.html", a=analytics_data(g.db, g.cfg))
 
 
 @app.route("/reports")
@@ -1274,6 +1536,11 @@ def records():
         args.append(stage)
     elif kind == "prospect" and stage == "open":
         where.append("stage!='Lost'")
+    missing = request.args.get("missing", "")
+    if missing in MISSING_FIELDS:
+        where.append(f"{missing} IS NULL")
+    else:
+        missing = ""
     w = " AND ".join(where)
     total = g.db.execute(f"SELECT COUNT(*) FROM records WHERE {w}", args).fetchone()[0]
     order = ("CASE WHEN expected_close IS NULL THEN 1 ELSE 0 END, expected_close, lower(company)"
@@ -1282,7 +1549,8 @@ def records():
                         args + [PAGE_SIZE, (page - 1) * PAGE_SIZE]).fetchall()
     pages = max((total + PAGE_SIZE - 1) // PAGE_SIZE, 1)
     return render_template("records.html", kind=kind, rows=rows, q=q, stage=stage, page=page,
-                           pages=pages, total=total, today=datetime.now(TZ).date().isoformat())
+                           pages=pages, total=total, today=datetime.now(TZ).date().isoformat(), missing=missing,
+                           missing_label=dict((f[0], f[1]) for f in DQ_FIELDS).get(missing, ""))
 
 
 def save_from_form(rid=None):

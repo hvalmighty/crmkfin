@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% block title %}Analytics{% endblock %}
+{% block content %}
+<div class="cur-wrap" data-cur="inr">
+<div class="bar">
+  <div class="grow"><h1>Analytics</h1>
+    <p class="sub" style="margin:0">Where the pipeline is, where it's heading, and what needs attention. INR and USD are tracked separately – nothing is converted.</p></div>
+  <div class="seg" role="group" aria-label="Currency"><button type="button" data-cur="inr">₹ INR</button><button type="button" data-cur="usd">$ USD</button></div>
+</div>
+
+<div class="grid kpis">
+  <div class="kpi hero"><div class="ico"><svg class="i"><use href="#i-layers"/></svg></div>
+    <div class="l">Open pipeline</div>
+    <div class="n"><span class="only-inr">{{ a.pipe.inr | inr_c }}</span><span class="only-usd">{{ a.pipe.usd | usd_c }}</span></div>
+    <div class="s">{{ a.open_n }} open prospect(s)</div></div>
+  <div class="kpi"><div class="ico"><svg class="i"><use href="#i-trend"/></svg></div>
+    <div class="l">Weighted forecast</div>
+    <div class="n"><span class="only-inr">{{ a.pipe.w_inr | inr_c }}</span><span class="only-usd">{{ a.pipe.w_usd | usd_c }}</span></div>
+    <div class="s">Value × probability</div></div>
+  <div class="kpi t-sky"><div class="ico"><svg class="i"><use href="#i-pie"/></svg></div>
+    <div class="l">Average deal size</div>
+    <div class="n"><span class="only-inr">{{ a.avg_inr | inr_c }}</span><span class="only-usd">{{ a.avg_usd | usd_c }}</span></div>
+    <div class="s">across <span class="only-inr">{{ a.n_inr }}</span><span class="only-usd">{{ a.n_usd }}</span> open deal(s) with an amount</div></div>
+  <div class="kpi t-ok"><div class="ico"><svg class="i"><use href="#i-award"/></svg></div>
+    <div class="l">Won in {{ a.cur_q }}</div>
+    <div class="n"><span class="only-inr">{{ a.won_q.inr | inr_c }}</span><span class="only-usd">{{ a.won_q.usd | usd_c }}</span></div>
+    <div class="s">{{ a.won_q.n }} client(s)</div></div>
+  <div class="kpi t-ok"><div class="ico"><svg class="i"><use href="#i-percent"/></svg></div>
+    <div class="l">Win rate</div>
+    <div class="n">{{ (a.win_rate ~ '%') if a.win_rate is not none else '–' }}</div>
+    <div class="s">{{ a.clients.n }} won · {{ a.lost_n }} lost</div></div>
+  <div class="kpi {{ 't-bad' if a.overdue_n else 't-warn' }}"><div class="ico"><svg class="i"><use href="#i-alert"/></svg></div>
+    <div class="l">Needs attention</div>
+    <div class="n">{{ a.overdue_n + a.stale_n }}</div>
+    <div class="s">{{ a.overdue_n }} overdue · {{ a.stale_n }} stale (30+ days)</div></div>
+</div>
+
+<div class="card">
+  <div class="card-h"><h2>Highlights</h2></div>
+  {% if a.highlights %}
+  <ul class="insights">
+    {% for tone, text in a.highlights %}
+    <li class="{{ tone }}"><span class="dot"><svg class="i" style="width:16px;height:16px"><use href="#{{ {'good':'i-trend','warn':'i-clock','bad':'i-alert','info':'i-info'}[tone] }}"/></svg></span><span class="t">{{ text }}</span></li>
+    {% endfor %}
+  </ul>
+  {% else %}<p class="empty">Add some prospects to see highlights.</p>{% endif %}
+</div>
+
+<div class="grid two">
+  <div class="card"><div class="card-h"><h2>Pipeline by stage</h2></div><div class="chart-box"><canvas id="c-stages"></canvas></div></div>
+  <div class="card"><div class="card-h"><h2>Forecast by expected closing month</h2></div><div class="chart-box"><canvas id="c-forecast"></canvas></div></div>
+</div>
+
+<div class="grid two">
+  <div class="card"><div class="card-h"><h2>Closed-won by quarter</h2></div><div class="chart-box"><canvas id="c-won"></canvas></div></div>
+  <div class="card"><div class="card-h"><h2>Win rate by region</h2><span class="muted">won ÷ (won + lost)</span></div>
+    {% if a.charts.winrate.labels %}<div class="chart-box"><canvas id="c-winrate"></canvas></div>
+    {% else %}<p class="empty">No won or lost deals with a region yet.</p>{% endif %}</div>
+</div>
+
+<div class="grid two">
+  <div class="card"><div class="card-h"><h2>Open pipeline by region / country</h2></div><div class="chart-box"><canvas id="c-region"></canvas></div></div>
+  <div class="card"><div class="card-h"><h2>Open pipeline by lead source</h2></div><div class="chart-box"><canvas id="c-source"></canvas></div></div>
+</div>
+
+<div class="grid two">
+  <div class="card"><div class="card-h"><h2>By presales lead</h2></div><div class="chart-box tall"><canvas id="c-presales"></canvas></div></div>
+  <div class="card"><div class="card-h"><h2>By sales owner</h2></div><div class="chart-box tall"><canvas id="c-owner"></canvas></div></div>
+</div>
+
+<div class="grid two">
+  <div class="card"><div class="card-h"><h2>Pipeline by probability</h2></div><div class="chart-box short"><canvas id="c-prob"></canvas></div></div>
+  <div class="card"><div class="card-h"><h2>Deal size distribution</h2><span class="muted">open deals</span></div><div class="chart-box short"><canvas id="c-size"></canvas></div></div>
+</div>
+
+<div class="card"><div class="card-h"><h2>Records added per month</h2><span class="muted">last 6 months</span></div><div class="chart-box short"><canvas id="c-added"></canvas></div></div>
+
+<div class="grid two">
+  <div class="card">
+    <div class="card-h"><h2>Top open deals</h2></div>
+    {% for cur, rows in (('inr', a.top_inr), ('usd', a.top_usd)) %}
+    <div class="only-{{ cur }}">
+    {% if rows %}<div class="scroll"><table>
+      <tr><th>Company</th><th>Stage</th><th class="c">Prob.</th><th>Closing</th><th class="r">Value</th></tr>
+      {% for r in rows %}<tr><td><a href="{{ url_for('record_edit', rid=r.id) }}"><strong>{{ r.company }}</strong></a>{% if r.region %}<br><span class="muted">{{ r.region }}</span>{% endif %}</td>
+        <td><span class="pill {{ r.stage }}">{{ r.stage }}</span></td><td class="c">{{ r.probability }}%</td>
+        <td>{{ r.expected_close | fdate if r.expected_close else '–' }}</td>
+        <td class="r">{{ (r.value | money) if cur == 'inr' else (r.value_usd | usd) }}</td></tr>{% endfor %}
+    </table></div>{% else %}<p class="empty">No open deals with a {{ 'rupee' if cur == 'inr' else 'dollar' }} amount.</p>{% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  <div class="card">
+    <div class="card-h"><h2>Stale deals</h2><span class="muted">not updated in 30+ days</span></div>
+    {% if a.stale %}<div class="scroll"><table>
+      <tr><th>Company</th><th>Stage</th><th class="r">Idle</th><th class="r">Value</th></tr>
+      {% for r in a.stale %}<tr><td><a href="{{ url_for('record_edit', rid=r.id) }}"><strong>{{ r.company }}</strong></a>{% if r.owner %}<br><span class="muted">{{ r.owner }}</span>{% endif %}</td>
+        <td><span class="pill {{ r.stage }}">{{ r.stage }}</span></td><td class="r">{{ r.days }} days</td>
+        <td class="r"><span class="only-inr">{{ (r.value | money) if r.value else '–' }}</span><span class="only-usd">{{ (r.value_usd | usd) if r.value_usd else '–' }}</span></td></tr>{% endfor %}
+    </table></div>
+    {% if a.stale_n > a.stale | length %}<p class="muted" style="margin-top:10px">Showing the {{ a.stale | length }} longest idle of {{ a.stale_n }}.</p>{% endif %}
+    {% else %}<p class="empty">Every open deal has been touched in the last 30 days 🎉</p>{% endif %}
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-h"><h2>Data quality</h2><span class="muted">Missing details make reports less accurate – click a number to see and fix those records</span></div>
+  <div class="dq">
+    <div class="row hd"><span>Detail</span><span>Open prospects</span><span>Clients</span></div>
+    {% for f in a.dq %}
+    <div class="row"><span>{{ f.label }}</span>
+      <span>{% if f.p is none %}<span class="muted">n/a</span>{% elif f.p %}<a class="num some" href="{{ url_for('records', type='prospect', stage='open', missing=f.key) }}">{{ f.p }} missing</a>{% else %}<span class="num zero">✓ complete</span>{% endif %}</span>
+      <span>{% if f.c is none %}<span class="muted">n/a</span>{% elif f.c %}<a class="num some" href="{{ url_for('records', type='client', missing=f.key) }}">{{ f.c }} missing</a>{% else %}<span class="num zero">✓ complete</span>{% endif %}</span></div>
+    {% endfor %}
+  </div>
+</div>
+</div>
+<script type="application/json" id="chart-data">{{ a.charts | tojson }}</script>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='vendor/chart.umd.js', v=ASSET_V) }}"></script>
+<script src="{{ url_for('static', filename='charts.js', v=ASSET_V) }}"></script>
+{% endblock %}

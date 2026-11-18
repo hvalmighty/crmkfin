@@ -83,3 +83,10 @@ TEST_DATABASE_URL=postgresql://user@host/emptydb python tests/smoke_test.py   # 
 
 ## Files
 `app.py` (backend) · `templates/` · `public/` (CSS/JS) · `vercel.json` (function + cron) · `requirements.txt` · `.env.example` · `gunicorn.conf.py` (non-Vercel hosting)
+
+## Analytics & look
+
+- **Dashboard** – KPI tiles (open pipeline, weighted forecast, won this quarter, win rate, needs attention), funnel, forecast by month, region split, overdue / upcoming lists.
+- **Analytics page** – pipeline by stage, probability and deal size, closed-won by quarter, win rate by region, pipeline by region / lead source / presales lead / sales owner, records added per month, top open deals, stale deals (30+ days idle), and a data-quality table (click a count to see the records missing that detail).
+- INR and USD are always tracked separately (toggle at the top of each page); nothing is converted.
+- Theme: sidebar SaaS dashboard style. Font: **Bai Jamjuree** (SIL Open Font License, see `public/fonts/LICENSE-BaiJamjuree-OFL.txt`). Fonts and Chart.js are self-hosted in `public/`, so no external requests are made.

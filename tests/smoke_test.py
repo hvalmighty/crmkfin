@@ -248,8 +248,44 @@ check("dashboard shows USD", "USD" in dash and "$" in dash)
 check("reports show USD columns", "Value $" in rep and "Weighted $" in rep and "$10,000" in rep)
 check("lists show both amounts", b"Value (USD)" in c.get("/records?type=prospect").data and b"Deal value (USD)" in c.get("/records?type=client").data)
 subj, text, html = crm.build_reminder(crm.connect(), crm.get_settings(crm.connect()))
-check("reminder e-mail shows INR and USD", "$10,000" in text and "\u20b98,00,000".replace("8,00,000", "800,000") in text and "Value (USD)" in html, text[:600])
+check("reminder e-mail shows INR and USD", "$10,000" in text and "\u20b98,00,000" in text and "Value (USD)" in html, text[:600])
 check("settings page no longer asks for currency symbol", b'name="currency"' not in c.get("/admin/settings").data)
+
+# 19b. analytics, new theme assets, number formats
+import json as _json
+check("Indian grouping", crm.fmt_money(1234567) == "\u20b912,34,567" and crm.indian_group(100) == "100" and crm.indian_group(999999) == "9,99,999" and crm.fmt_money(800000, "$") == "$800,000")
+check("compact formats", crm.fmt_compact(12500000) == "\u20b91.25 Cr" and crm.fmt_compact(4530000) == "\u20b945.3 L" and crm.fmt_compact(1250000, "$") == "$1.25M" and crm.fmt_compact(12500, "$") == "$12.5K" and crm.fmt_compact(900, "$") == "$900")
+t = token(path="/records/new")
+c.post("/records/new", data={"_csrf": t, "type": "prospect", "company": "Past Due Co", "stage": "Proposal", "probability": "40",
+                             "expected_close": "2026-01-05", "value": "300000"}, follow_redirects=True)
+r = c.get("/analytics"); html = r.get_data(as_text=True)
+check("analytics page renders", r.status_code == 200 and "Highlights" in html and "Data quality" in html and "Stale deals" in html)
+m = re.search(r'<script type="application/json" id="chart-data">(.*?)</script>', html, re.S)
+J = _json.loads(m.group(1)) if m else {}
+check("analytics chart data is valid JSON with all series", all(k in J for k in ("stages", "forecast", "won", "prob", "size", "added", "winrate", "region", "source", "presales", "owner")), list(J))
+check("forecast buckets: Overdue first, No date last", J["forecast"]["labels"][0] == "Overdue" and J["forecast"]["labels"][-1] == "No date" and len(J["forecast"]["inr"]) == len(J["forecast"]["labels"]))
+check("overdue prospect lands in Overdue bucket", J["forecast"]["count"][0] >= 1, J["forecast"])
+check("USD forecast carries Dollar Co", sum(J["forecast"]["usd"]) >= 10000, J["forecast"]["usd"])
+check("region series groups UAE case-insensitively", J["region"]["labels"].count("UAE") + J["region"]["labels"].count("uae") == 1, J["region"]["labels"])
+check("win-rate series has region with a client/lost", len(J["winrate"]["labels"]) >= 0 and len(J["winrate"]["rate"]) == len(J["winrate"]["labels"]))
+for cid in ("c-stages", "c-forecast", "c-won", "c-region", "c-source", "c-presales", "c-owner", "c-prob", "c-size", "c-added"):
+    check(f"analytics has canvas {cid}", f'id="{cid}"' in html)
+A = crm.analytics_data(crm.connect(), crm.get_settings(crm.connect()))
+check("analytics KPIs consistent with funnel", A["open_n"] == sum(x["count"] for x in crm.funnel(crm.connect())[0]), (A["open_n"],))
+check("data-quality rows present", {d["key"] for d in A["dq"]} >= {"owner", "region", "expected_close", "value_usd"} and all(d["p"] is None or d["p"] >= 0 for d in A["dq"]))
+check("highlights are plain-language strings", A["highlights"] and all(isinstance(t, str) and len(t) > 10 for _, t in A["highlights"]), A["highlights"])
+r = c.get("/records?type=prospect&stage=open&missing=owner"); check("missing-field filter + chip", r.status_code == 200 and b"Missing: Sales owner" in r.data)
+check("unknown 'missing' value ignored (no SQL injection)", c.get("/records?type=prospect&missing=owner;DROP TABLE records").status_code == 200 and crm.connect().execute("SELECT COUNT(*) FROM records").fetchone()[0] > 0)
+dash = c.get("/").get_data(as_text=True)
+check("dashboard has charts + currency switch", 'id="c-forecast"' in dash and 'id="c-region"' in dash and 'data-cur="usd"' in dash and "Open pipeline" in dash)
+css = c.get("/style.css")
+check("stylesheet served with Bai Jamjuree", css.status_code == 200 and b"Bai Jamjuree" in css.data)
+for pth, minsize in (("/fonts/bai-jamjuree-latin-400-normal.woff2", 5000), ("/fonts/bai-jamjuree-latin-ext-600-normal.woff2", 5000), ("/vendor/chart.umd.js", 100000), ("/charts.js", 1000), ("/app.js", 500)):
+    rr = c.get(pth); check(f"asset served {pth}", rr.status_code == 200 and len(rr.data) >= minsize, (rr.status_code, len(rr.data)))
+check("font files have long-cache-safe versioned urls on page", "style.css?v=" in dash)
+lp = crm.app.test_client().get("/login").get_data(as_text=True)
+check("login page uses the new brand layout", "brand-top" in lp and "<aside" not in lp)
+check("app pages use sidebar layout", "<aside" in dash and "Analytics" in dash)
 
 # 20. admin delete-all (destructive - keep last)
 before = crm.connect().execute("SELECT COUNT(*) FROM records").fetchone()[0]
@@ -280,7 +316,7 @@ r = c.post("/admin/delete-data", data={"_csrf": t, "scope": "all", "confirm": "D
 check("delete everything", b"Deleted 1 record" in r.data and crm.connect().execute("SELECT COUNT(*) FROM records").fetchone()[0] == 0)
 check("users + settings survive delete", crm.connect().execute("SELECT COUNT(*) FROM users").fetchone()[0] >= 3)
 check("deletes are audit-logged", crm.connect().execute("SELECT COUNT(*) FROM audit_log WHERE action IN ('delete_data','delete_data_denied')").fetchone()[0] >= 4)
-for pth in ["/", "/reports", "/records?type=prospect", "/records?type=client", "/admin/delete-data"]:
+for pth in ["/", "/analytics", "/reports", "/records?type=prospect", "/records?type=client", "/admin/delete-data"]:
     check(f"pages render with empty database {pth}", c.get(pth).status_code == 200)
 
 print("backend:", "PostgreSQL" if crm.USE_PG else "SQLite")

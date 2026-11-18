@@ -12,6 +12,7 @@
 </div>
 <form class="bar" method="get">
   <input type="hidden" name="type" value="{{ kind }}">
+  {% if missing %}<input type="hidden" name="missing" value="{{ missing }}">{% endif %}
   <input type="text" name="q" value="{{ q }}" placeholder="Search company, contact, e-mail, owner, presales, region" style="max-width:340px">
   {% if kind == 'prospect' %}
   <select name="stage" style="max-width:180px">
@@ -20,10 +21,11 @@
   </select>
   {% endif %}
   <button type="submit" class="alt">Filter</button>
-  {% if q or stage %}<a href="{{ url_for('records', type=kind) }}">Clear</a>{% endif %}
+  {% if q or stage or missing %}<a href="{{ url_for('records', type=kind) }}">Clear all</a>{% endif %}
+  {% if missing %}<span class="chip">Missing: {{ missing_label }} <a href="{{ url_for('records', type=kind, q=q, stage=stage) }}" title="Remove this filter">&times;</a></span>{% endif %}
 </form>
 
-<div class="card" style="padding:0">
+<div class="card flush">
 {% if rows %}
 <div class="scroll"><table>
   {% if kind == 'prospect' %}
@@ -73,9 +75,9 @@
 
 {% if pages > 1 %}
 <div class="pager">
-  {% if page > 1 %}<a href="{{ url_for('records', type=kind, q=q, stage=stage, page=page-1) }}">← Previous</a>{% endif %}
+  {% if page > 1 %}<a href="{{ url_for('records', type=kind, q=q, stage=stage, missing=missing, page=page-1) }}">← Previous</a>{% endif %}
   <span>Page {{ page }} of {{ pages }}</span>
-  {% if page < pages %}<a href="{{ url_for('records', type=kind, q=q, stage=stage, page=page+1) }}">Next →</a>{% endif %}
+  {% if page < pages %}<a href="{{ url_for('records', type=kind, q=q, stage=stage, missing=missing, page=page+1) }}">Next →</a>{% endif %}
 </div>
 {% endif %}
 {% endblock %}

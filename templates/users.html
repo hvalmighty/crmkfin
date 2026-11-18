@@ -3,7 +3,7 @@
 {% block content %}
 <div class="bar"><div class="grow"><h1>Users</h1><p class="sub" style="margin:0">Only admins can add, disable or reset users.</p></div>
   <a class="btn" href="{{ url_for('user_new') }}">+ Add user</a></div>
-<div class="card" style="padding:0"><div class="scroll"><table>
+<div class="card flush"><div class="scroll"><table>
   <tr><th>Login ID</th><th>E-mail</th><th>Role</th><th>Status</th><th>Last login (UTC)</th><th></th></tr>
   {% for u in rows %}
   <tr>
