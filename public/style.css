@@ -226,3 +226,11 @@ body.auth .wrap { max-width: 460px; padding: 7vh 20px; }
   .dq .row { grid-template-columns: 1fr 70px 70px; }
 }
 @media print { .side, .topbar, .btn, button { display: none !important; } .shell { display: block; } .card, .kpi { box-shadow: none; } }
+
+/* "By ..." credit line under the app name: small, light red, sized to sit within the name's width */
+.nm { display: inline-flex; flex-direction: column; align-items: flex-start; }
+.nm .by { display: block; white-space: nowrap; width: 0; min-width: 100%; overflow: visible; font-size: 7.7px; font-weight: 600;
+  letter-spacing: .02em; text-transform: uppercase; color: #ef8a92; line-height: 1.3; margin-top: 3px; }
+.login-box .brand-top .nm { align-items: center; }
+.login-box .brand-top .nm .by { text-align: center; }
+.login-box .brand-top .nm h1 { margin: 0; }
