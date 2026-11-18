@@ -72,7 +72,7 @@ MAX_LOCK_ATTEMPTS = 5
 LOCK_MINUTES = 15
 
 SETTING_DEFAULTS = {
-    "company_name": "My CRM",
+    "company_name": "QUEST FT",
     "currency": "₹",
     "fy_start_month": "1",           # 1 = calendar-year quarters, 4 = April-March FY
     "reminder_enabled": "1",
@@ -282,6 +282,8 @@ def init_db():
     migrate(conn)
     for k, v in SETTING_DEFAULTS.items():
         conn.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO NOTHING", (k, v))
+    # app was renamed from the original default name
+    conn.execute("UPDATE settings SET value=? WHERE key='company_name' AND value='My CRM'", ("QUEST FT",))
     if not conn.execute("SELECT 1 FROM users").fetchone():
         username = os.environ.get("CRM_ADMIN_USER", "admin")
         pw = os.environ.get("CRM_ADMIN_PASSWORD")
@@ -1778,7 +1780,7 @@ def settings():
             return redirect(url_for("settings"))
         emails = parse_emails(request.form.get("reminder_emails"))
         bad = [x for x in emails if not EMAIL_RE.match(x)]
-        company = (request.form.get("company_name") or "My CRM").strip()[:60]
+        company = (request.form.get("company_name") or "QUEST FT").strip()[:60]
         currency = (request.form.get("currency") or "₹").strip()[:4]
         try:
             fy = int(request.form.get("fy_start_month", 1))
