@@ -65,6 +65,17 @@
 
 <div class="grid two">
   <div class="card">
+    <div class="card-h"><h2>Open pipeline by product</h2><a class="muted" href="{{ url_for('analytics') }}">More →</a></div>
+    <div class="chart-box"><canvas id="c-product"></canvas></div>
+  </div>
+  <div class="card">
+    <div class="card-h"><h2>Product vs service</h2></div>
+    <div class="chart-box"><canvas id="c-offering"></canvas></div>
+  </div>
+</div>
+
+<div class="grid two">
+  <div class="card">
     <div class="card-h"><h2>Overdue closures ({{ d.overdue | length }})</h2></div>
     {% if d.overdue %}
     <div class="scroll"><table>

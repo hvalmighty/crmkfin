@@ -27,6 +27,17 @@
     <div><label for="region">Region / Country</label>
       <input id="region" name="region" type="text" maxlength="80" list="dl-region" value="{{ rec.region or '' }}" placeholder="e.g. India, UAE, USA">
       <datalist id="dl-region">{% for v in distinct('region') %}<option value="{{ v }}">{% endfor %}</datalist></div>
+    <div><label for="product">Product</label>
+      <select id="product" name="product">
+        <option value="">– select –</option>
+        {% for n in product_choices(rec.product) %}<option value="{{ n }}" {{ 'selected' if rec.product and rec.product | lower == n | lower }}>{{ n }}</option>{% endfor %}
+      </select>
+      </div>
+    <div><label for="offering_type">Product / Service</label>
+      <select id="offering_type" name="offering_type">
+        <option value="">– select –</option>
+        {% for t in OFFERING_TYPES %}<option {{ 'selected' if rec.offering_type == t }}>{{ t }}</option>{% endfor %}
+      </select></div>
     <div><label for="source">Lead source</label>
       <input id="source" name="source" type="text" maxlength="80" value="{{ rec.source or '' }}" placeholder="Referral, website, event…"></div>
     <div><label for="value"><span data-only="prospect">Expected value (INR ₹)</span><span data-only="client">Deal value (INR ₹)</span></label>

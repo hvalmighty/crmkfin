@@ -49,7 +49,7 @@
   </div>
 </div>
 
-{% for title, rows, label in (('By region / country', r.by_region, 'Region / Country'), ('By presales lead', r.by_presales, 'Presales lead')) %}
+{% for title, rows, label in (('By region / country', r.by_region, 'Region / Country'), ('By presales lead', r.by_presales, 'Presales lead'), ('By product', r.by_product, 'Product'), ('Product vs service', r.by_offering, 'Type')) %}
 <div class="card">
   <h2>{{ title }}</h2>
   {% if rows %}<div class="scroll"><table>

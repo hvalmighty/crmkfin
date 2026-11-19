@@ -13,7 +13,7 @@
 <form class="bar" method="get">
   <input type="hidden" name="type" value="{{ kind }}">
   {% if missing %}<input type="hidden" name="missing" value="{{ missing }}">{% endif %}
-  <input type="text" name="q" value="{{ q }}" placeholder="Search company, contact, e-mail, owner, presales, region" style="max-width:340px">
+  <input type="text" name="q" value="{{ q }}" placeholder="Search company, contact, e-mail, owner, presales, region, product" style="max-width:340px">
   {% if kind == 'prospect' %}
   <select name="stage" style="max-width:180px">
     <option value="">All stages</option><option value="open" {{ 'selected' if stage == 'open' }}>Open (not lost)</option>
@@ -29,10 +29,11 @@
 {% if rows %}
 <div class="scroll"><table>
   {% if kind == 'prospect' %}
-  <tr><th>Company</th><th>Contact</th><th>Stage</th><th class="c">Prob.</th><th>Expected close</th><th class="r">Value (INR)</th><th class="r">Value (USD)</th><th>Owner</th><th>Presales lead</th><th>Region</th><th></th></tr>
+  <tr><th>Company</th><th>Product</th><th>Contact</th><th>Stage</th><th class="c">Prob.</th><th>Expected close</th><th class="r">Value (INR)</th><th class="r">Value (USD)</th><th>Owner</th><th>Presales lead</th><th>Region</th><th></th></tr>
   {% for r in rows %}
   <tr class="{{ 'overdue' if r.expected_close and r.expected_close < today and r.stage != 'Lost' }}">
     <td><a href="{{ url_for('record_edit', rid=r.id) }}"><strong>{{ r.company }}</strong></a></td>
+    <td style="white-space:nowrap">{% if r.product %}{{ r.product }}{% if r.offering_type %}<br><span class="muted">{{ r.offering_type }}</span>{% endif %}{% elif r.offering_type %}<span class="muted">{{ r.offering_type }}</span>{% endif %}</td>
     <td>{{ r.contact_name or '' }}{% if r.email %}<br><span class="muted">{{ r.email }}</span>{% endif %}</td>
     <td><span class="pill {{ r.stage }}">{{ r.stage }}</span></td>
     <td class="c">{{ r.probability }}%</td>
@@ -50,10 +51,11 @@
   </tr>
   {% endfor %}
   {% else %}
-  <tr><th>Company</th><th>Contact</th><th>Closed date</th><th>Quarter</th><th class="r">Deal value (INR)</th><th class="r">Deal value (USD)</th><th>Owner</th><th>Presales lead</th><th>Region</th><th></th></tr>
+  <tr><th>Company</th><th>Product</th><th>Contact</th><th>Closed date</th><th>Quarter</th><th class="r">Deal value (INR)</th><th class="r">Deal value (USD)</th><th>Owner</th><th>Presales lead</th><th>Region</th><th></th></tr>
   {% for r in rows %}
   <tr>
     <td><a href="{{ url_for('record_edit', rid=r.id) }}"><strong>{{ r.company }}</strong></a></td>
+    <td style="white-space:nowrap">{% if r.product %}{{ r.product }}{% if r.offering_type %}<br><span class="muted">{{ r.offering_type }}</span>{% endif %}{% elif r.offering_type %}<span class="muted">{{ r.offering_type }}</span>{% endif %}</td>
     <td>{{ r.contact_name or '' }}{% if r.email %}<br><span class="muted">{{ r.email }}</span>{% endif %}</td>
     <td>{{ r.closed_date | fdate if r.closed_date else '–' }}</td>
     <td>{{ r.closed_quarter or '–' }}</td>

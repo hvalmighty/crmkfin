@@ -287,6 +287,99 @@ lp = crm.app.test_client().get("/login").get_data(as_text=True)
 check("login page uses the new brand layout", "brand-top" in lp and "<aside" not in lp)
 check("app pages use sidebar layout", "<aside" in dash and "Analytics" in dash)
 
+# 19c. product master + product / service
+db = crm.connect()
+seeded = [r["name"] for r in db.execute("SELECT name FROM products ORDER BY id")]
+check("product master seeded", seeded == ["mPower Wealth", "mPower Asset Management", "Pension admin", "RTA"], seeded)
+form = c.get("/records/new").get_data(as_text=True)
+check("form has product dropdown with master values + Product/Service",
+      'name="product"' in form and "mPower Asset Management" in form and "Pension admin" in form and 'name="offering_type"' in form and ">Service</option>" in form)
+t = token(path="/records/new")
+c.post("/records/new", data={"_csrf": t, "type": "prospect", "company": "Prod Co", "stage": "Proposal", "probability": "50",
+                             "value": "1000000", "product": "mpower wealth", "offering_type": "Product", "expected_close": "2027-01-15"}, follow_redirects=True)
+row = crm.connect().execute("SELECT product, offering_type FROM records WHERE company='Prod Co'").fetchone()
+check("form saves product (master spelling) + type", row and row["product"] == "mPower Wealth" and row["offering_type"] == "Product", row and dict(row))
+r = c.post("/records/new", data={"_csrf": t, "type": "prospect", "company": "BadProd", "product": "Made Up"})
+check("product outside master rejected", b"pick one from the list" in r.data)
+r = c.post("/records/new", data={"_csrf": t, "type": "prospect", "company": "BadType", "offering_type": "Gadget"})
+check("bad Product / Service rejected", b"must be" in r.data and b"Product" in r.data)
+c.post("/records/new", data={"_csrf": t, "type": "client", "company": "Svc Client", "closed_date": "2026-10-01", "value_usd": "4000",
+                             "product": "RTA", "offering_type": "Service"}, follow_redirects=True)
+c.post("/records/new", data={"_csrf": t, "type": "prospect", "company": "Svc Prospect", "stage": "Lead", "value": "200000",
+                             "product": "RTA", "offering_type": "Service"}, follow_redirects=True)
+# admin product master
+t = token(path="/admin/products")
+r = c.post("/admin/products", data={"_csrf": t, "name": "Custody Suite"}, follow_redirects=True)
+check("admin adds product", b"Custody Suite" in r.data)
+check("new product appears in dropdown", "Custody Suite" in c.get("/records/new").get_data(as_text=True))
+r = c.post("/admin/products", data={"_csrf": t, "name": "custody suite"}, follow_redirects=True)
+check("duplicate product (any case) rejected", b"already in the list" in r.data)
+# Excel import: header aliases, unknown product auto-added, canonical spelling
+wb = Workbook(); ws = wb.active; ws.title = "Prospects"
+ws.append(["Company", "Product Name", "Product / Service", "Expected Value (INR)"])
+ws.append(["XlProd1", "PENSION ADMIN", "service", 50000]); ws.append(["XlProd2", "Brand New Product", "Product", 70000])
+ws.append(["XlProd3", None, "Maybe", 1000])
+bio = io.BytesIO(); wb.save(bio)
+t = token(path="/data")
+r = c.post("/data", data={"_csrf": t, "dry_run": "1", "file": (io.BytesIO(bio.getvalue()), "p.xlsx")}, content_type="multipart/form-data")
+check("dry run mentions new product", b"Brand New Product" in r.data and b"must be" in r.data)
+check("dry run did not add product", crm.connect().execute("SELECT COUNT(*) FROM products WHERE lower(name)='brand new product'").fetchone()[0] == 0)
+t = token(path="/data")
+c.post("/data", data={"_csrf": t, "file": (io.BytesIO(bio.getvalue()), "p.xlsx")}, content_type="multipart/form-data")
+d = {r["company"]: r for r in crm.connect().execute("SELECT company, product, offering_type FROM records WHERE company LIKE 'XlProd%'")}
+check("import uses master spelling + normalises type", d["XlProd1"]["product"] == "Pension admin" and d["XlProd1"]["offering_type"] == "Service", dict(d["XlProd1"]))
+check("import auto-adds unknown product to master", d["XlProd2"]["product"] == "Brand New Product" and "Brand New Product" in c.get("/admin/products").get_data(as_text=True))
+check("import row with bad type skipped", "XlProd3" not in d)
+check("new product shows in form dropdown", "Brand New Product" in c.get("/records/new").get_data(as_text=True))
+# template + export columns
+tw = load_workbook(io.BytesIO(c.get("/template.xlsx").data)); th = [x.value for x in tw["Prospects"][1]]
+check("template has Product + Product / Service", "Product" in th and "Product / Service" in th and "Product / Service" in [x.value for x in tw["Clients"][1]])
+check("template stage dropdown still on the Stage column", any("K2" in str(dv.sqref) and "Lead" in (dv.formula1 or "") for dv in tw["Prospects"].data_validations.dataValidation), th)
+ex = load_workbook(io.BytesIO(c.get("/export.xlsx").data)); hdr = [x.value for x in ex["Prospects"][1]]
+vals = {r[0].value: r for r in ex["Prospects"].iter_rows(min_row=2)}
+check("export has product columns", vals["Prod Co"][hdr.index("Product")].value == "mPower Wealth" and vals["Prod Co"][hdr.index("Product / Service")].value == "Product")
+check("export keeps stage/value in place", vals["Prod Co"][hdr.index("Stage")].value == "Proposal" and vals["Prod Co"][hdr.index("Expected Value (INR)")].value == 1000000)
+# lists, search, missing filter
+lp = c.get("/records?type=prospect").get_data(as_text=True)
+check("list shows Product column + value", "<th>Product</th>" in lp and "mPower Wealth" in lp)
+check("search by product", b"Prod Co" in c.get("/records?type=prospect&q=mpower").data)
+r = c.get("/records?type=prospect&stage=open&missing=product")
+check("missing product filter", r.status_code == 200 and b"Prod Co" not in r.data and b"Acme Ltd" in r.data)
+# rename + delete rules
+pid = lambda n: crm.connect().execute("SELECT id FROM products WHERE name=?", (n,)).fetchone()[0]
+t = token(path="/admin/products")
+c.post(f"/admin/products/{pid('RTA')}/rename", data={"_csrf": t, "name": "RTA Platform"}, follow_redirects=True)
+check("rename cascades to records", crm.connect().execute("SELECT COUNT(*) FROM records WHERE product='RTA Platform'").fetchone()[0] == 2 and crm.connect().execute("SELECT COUNT(*) FROM records WHERE product='RTA'").fetchone()[0] == 0)
+r = c.post(f"/admin/products/{pid('RTA Platform')}/delete", data={"_csrf": t}, follow_redirects=True)
+check("in-use product cannot be deleted", b"hide it instead" in r.data and crm.connect().execute("SELECT COUNT(*) FROM products WHERE name='RTA Platform'").fetchone()[0] == 1)
+c.post(f"/admin/products/{pid('Custody Suite')}/delete", data={"_csrf": t}, follow_redirects=True)
+check("unused product can be deleted", crm.connect().execute("SELECT COUNT(*) FROM products WHERE name='Custody Suite'").fetchone()[0] == 0)
+c.post(f"/admin/products/{pid('Pension admin')}/toggle", data={"_csrf": t}, follow_redirects=True)
+check("hidden product leaves dropdown", ">Pension admin<" not in c.get("/records/new").get_data(as_text=True))
+t = token(path="/records/new")
+r = c.post("/records/new", data={"_csrf": t, "type": "prospect", "company": "HiddenTry", "product": "Pension admin"})
+check("hidden product cannot be chosen for new record", b"pick one from the list" in r.data)
+rid = crm.connect().execute("SELECT id FROM records WHERE company='XlProd1'").fetchone()[0]
+check("record keeps its hidden product when edited", "Pension admin" in c.get(f"/records/{rid}/edit").get_data(as_text=True))
+c.post(f"/admin/products/{pid('Pension admin')}/toggle", data={"_csrf": t}, follow_redirects=True)
+# analytics
+a = crm.analytics_data(crm.connect(), crm.get_settings(crm.connect()))
+pl = dict(zip(a["charts"]["product"]["labels"], a["charts"]["product"]["inr"]))
+check("analytics: pipeline by product", pl.get("mPower Wealth") == 1000000 and pl.get("RTA Platform") == 200000, pl)
+off = dict(zip(a["charts"]["offering"]["labels"], a["charts"]["offering"]["inr"]))
+check("analytics: product vs service split", off.get("Product", 0) >= 1000000 and off.get("Service", 0) >= 250000, off)
+bp = {x["name"]: x for x in a["by_product"]}
+check("analytics: product scorecard has won + USD", bp["RTA Platform"]["clients"] == 1 and bp["RTA Platform"]["won_value_usd"] == 4000 and bp["RTA Platform"]["open_n"] == 1, bp.get("RTA Platform"))
+check("analytics: closed-won by product", dict(zip(a["charts"]["prodwon"]["labels"], a["charts"]["prodwon"]["usd"])).get("RTA Platform") == 4000)
+html = c.get("/analytics").get_data(as_text=True)
+check("analytics page shows product sections", "Open pipeline by product" in html and "Product scorecard" in html and "c-offering" in html)
+check("dashboard shows product chart", "c-product" in c.get("/").get_data(as_text=True))
+rep = c.get("/reports").get_data(as_text=True)
+check("reports have product sections", "By product" in rep and "Product vs service" in rep and "mPower Wealth" in rep)
+subj, text, html2 = crm.build_reminder(crm.connect(), crm.get_settings(crm.connect()))
+check("reminder e-mail includes product", "mPower Wealth (Product)" in text and "mPower Wealth" in html2)
+check("DQ table lists product", any(x["key"] == "product" for x in a["dq"]))
+
 # 20. admin delete-all (destructive - keep last)
 before = crm.connect().execute("SELECT COUNT(*) FROM records").fetchone()[0]
 check("have data to delete", before > 5, before)
@@ -301,6 +394,7 @@ check("csrf required", c.post("/admin/delete-data", data={"scope": "all", "confi
 ts2 = token(sc, "/account/password")
 sc.post("/account/password", data={"_csrf": ts2, "current": "TempPass12345", "new": "SamPass2026x", "new2": "SamPass2026x"})
 check("non-admin blocked from delete page", sc.get("/admin/delete-data").status_code == 403)
+check("non-admin blocked from product master", sc.get("/admin/products").status_code == 403 and sc.post("/admin/products", data={"_csrf": ts2, "name": "Sneaky"}).status_code == 403)
 ts2 = token(sc, "/records")
 check("non-admin cannot POST delete", sc.post("/admin/delete-data", data={"_csrf": ts2, "scope": "all", "confirm": "DELETE", "password": "SamPass2026x"}).status_code == 403)
 check("non-admin did not delete", crm.connect().execute("SELECT COUNT(*) FROM records").fetchone()[0] == before)

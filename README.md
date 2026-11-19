@@ -70,8 +70,8 @@ Keep **one worker** (set in `gunicorn.conf.py`) when using SQLite and the built-
 Download the template from **Import / Export**.
 | Sheet | Columns |
 |---|---|
-| Prospects | Company*, Contact Name, Email, Phone, Owner, Presales Lead, Region / Country, Source, Stage, Probability (%), Expected Close Date, Expected Value (INR), Expected Value (USD), Notes |
-| Clients | Company*, Contact Name, Email, Phone, Owner, Presales Lead, Region / Country, Source, Closed Date, Closed Quarter, Deal Value (INR), Deal Value (USD), Notes |
+| Prospects | Company*, Contact Name, Email, Phone, Owner, Presales Lead, Region / Country, Product, Product / Service, Source, Stage, Probability (%), Expected Close Date, Expected Value (INR), Expected Value (USD), Notes |
+| Clients | Company*, Contact Name, Email, Phone, Owner, Presales Lead, Region / Country, Product, Product / Service, Source, Closed Date, Closed Quarter, Deal Value (INR), Deal Value (USD), Notes |
 
 Each amount goes in its own currency column (nothing is converted); region / country and presales lead are free text (older files without them still import). Dates are read as DD-MM-YYYY. Existing records are matched on **Company + E-mail** and updated; others are added. Bad rows are reported and skipped, good rows still import.
 
@@ -90,3 +90,10 @@ TEST_DATABASE_URL=postgresql://user@host/emptydb python tests/smoke_test.py   # 
 - **Analytics page** – pipeline by stage, probability and deal size, closed-won by quarter, win rate by region, pipeline by region / lead source / presales lead / sales owner, records added per month, top open deals, stale deals (30+ days idle), and a data-quality table (click a count to see the records missing that detail).
 - INR and USD are always tracked separately (toggle at the top of each page); nothing is converted.
 - Theme: sidebar SaaS dashboard style. Font: **Bai Jamjuree** (SIL Open Font License, see `public/fonts/LICENSE-BaiJamjuree-OFL.txt`). Fonts and Chart.js are self-hosted in `public/`, so no external requests are made.
+
+## Products
+
+- Every prospect and client has a **Product** (dropdown) and a **Product / Service** type.
+- Admins manage the dropdown under **Product master** (add, rename, hide, delete if unused). It starts with mPower Wealth, mPower Asset Management, Pension admin and RTA.
+- In an Excel import, a product that is not in the master yet is added to it automatically (spelling is matched case-insensitively to the master). Columns: `Product`, `Product / Service` (placed after Region / Country in the template).
+- Analytics: pipeline by product, product vs service, closed-won by product, win rate by product, and a product scorecard; Reports has the same by product / product vs service.

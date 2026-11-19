@@ -77,12 +77,11 @@
         options: { scales: { x: noGrid, y: { grid: { color: GRID }, border: { display: false }, beginAtZero: true, ticks: { precision: 0 } } },
           plugins: { legend: { display: false } } } };
     },
-    "c-winrate": function () {
-      var R = D.winrate;
-      return { type: "bar", data: { labels: R.labels, datasets: [bars("Win rate", R.rate, C.green)] },
-        options: { indexAxis: "y", scales: { x: { min: 0, max: 100, grid: { color: GRID }, border: { display: false }, ticks: { callback: function (v) { return v + "%"; } } }, y: noGrid },
-          plugins: { legend: { display: false }, tooltip: { callbacks: { label: function (ctx) { var i = ctx.dataIndex; return " " + R.rate[i] + "% (" + R.won[i] + " won, " + R.lost[i] + " lost)"; } } } } } };
-    },
+    "c-product": function (c) { return hbar(D.product, c); },
+    "c-offering": function (c) { return doughnut(D.offering, c); },
+    "c-prodwon": function (c) { return doughnut(D.prodwon, c); },
+    "c-prodwin": function () { return winrate(D.prodwin); },
+    "c-winrate": function () { return winrate(D.winrate); },
     "c-added": function () {
       var A = D.added;
       function line(l, d, col) { return { label: l, data: d, borderColor: col, backgroundColor: col + "22", fill: true, tension: .35, pointRadius: 4, borderWidth: 2.5 }; }
@@ -91,6 +90,11 @@
     }
   };
 
+  function winrate(R) {
+    return { type: "bar", data: { labels: R.labels, datasets: [bars("Win rate", R.rate, C.green)] },
+      options: { indexAxis: "y", scales: { x: { min: 0, max: 100, grid: { color: GRID }, border: { display: false }, ticks: { callback: function (v) { return v + "%"; } } }, y: noGrid },
+        plugins: { legend: { display: false }, tooltip: { callbacks: { label: function (ctx) { var i = ctx.dataIndex; return " " + R.rate[i] + "% (" + R.won[i] + " won, " + R.lost[i] + " lost)"; } } } } } };
+  }
   function hbar(S, c) {
     return { type: "bar", data: { labels: S.labels, datasets: [bars("Pipeline", S[c], "#f6c3c8"), bars("Weighted", S["w_" + c], C.brand)] },
       options: { indexAxis: "y", scales: { x: axisMoney(c), y: noGrid }, plugins: { legend: { position: "bottom" },

@@ -11,6 +11,7 @@
      <strong>{{ result.updated }}</strong> {{ 'would be ' if result.dry }}updated ·
      <strong>{{ result.skipped }}</strong> skipped (already exist) ·
      <strong>{{ result.errors | length }}</strong> row problem(s)</p>
+  {% if result.new_products %}<p><strong>{{ result.new_products | length }}</strong> new product(s) {{ 'would be ' if result.dry }}added to the Product master: {{ result.new_products | join(', ') }}</p>{% endif %}
   {% for s in result.sheets %}<p class="muted" style="margin:2px 0">Sheet “{{ s.sheet }}”: {{ s.ok }} of {{ s.rows }} rows OK</p>{% endfor %}
   {% if result.errors %}
   <h2 style="margin-top:16px">Rows that need fixing</h2>

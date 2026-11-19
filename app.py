@@ -84,6 +84,10 @@ SETTING_DEFAULTS = {
     "reminder_status": "",
 }
 
+DEFAULT_PRODUCTS = ["mPower Wealth", "mPower Asset Management", "Pension admin", "RTA"]
+OFFERING_TYPES = ["Product", "Service"]
+
+
 def schema_statements():
     pk = "SERIAL PRIMARY KEY" if USE_PG else "INTEGER PRIMARY KEY AUTOINCREMENT"
     real = "DOUBLE PRECISION" if USE_PG else "REAL"
@@ -107,7 +111,7 @@ def schema_statements():
             type TEXT NOT NULL CHECK (type IN ('prospect','client')),
             company TEXT NOT NULL,
             contact_name TEXT, email TEXT, phone TEXT, owner TEXT, source TEXT,
-            presales_lead TEXT, region TEXT,
+            presales_lead TEXT, region TEXT, product TEXT, offering_type TEXT,
             stage TEXT, probability INTEGER, expected_close TEXT,
             value {real}, value_usd {real},
             closed_date TEXT, closed_quarter TEXT,
@@ -117,12 +121,18 @@ def schema_statements():
         "CREATE INDEX IF NOT EXISTS idx_records_type ON records(type)",
         "CREATE INDEX IF NOT EXISTS idx_records_company_lc ON records(lower(company))",
         "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)",
+        f"""CREATE TABLE IF NOT EXISTS products (
+            id {pk},
+            name {uname},
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL)""",
         f"""CREATE TABLE IF NOT EXISTS audit_log (
             id {pk},
             ts TEXT NOT NULL, username TEXT, action TEXT NOT NULL, detail TEXT)""",
     ]
     if USE_PG:
         stmts.append("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_lc ON users (lower(username))")
+        stmts.append("CREATE UNIQUE INDEX IF NOT EXISTS idx_products_name_lc ON products (lower(name))")
     return stmts
 
 # --------------------------------------------------------------------------- helpers
@@ -256,7 +266,7 @@ def password_problem(pw, username=""):
     return None
 
 
-NEW_RECORD_COLUMNS = {"presales_lead": "TEXT", "region": "TEXT",
+NEW_RECORD_COLUMNS = {"presales_lead": "TEXT", "region": "TEXT", "product": "TEXT", "offering_type": "TEXT",
                       "value_usd": "DOUBLE PRECISION" if USE_PG else "REAL"}
 
 
@@ -282,6 +292,10 @@ def init_db():
     migrate(conn)
     for k, v in SETTING_DEFAULTS.items():
         conn.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO NOTHING", (k, v))
+    if not conn.execute("SELECT 1 FROM products").fetchone():   # first run: seed the product master
+        for nm in DEFAULT_PRODUCTS:
+            conn.execute("INSERT INTO products(name,active,created_at) VALUES(?,1,?) ON CONFLICT DO NOTHING",
+                         (nm, iso(utcnow())))
     # app was renamed from the original default name
     conn.execute("UPDATE settings SET value=? WHERE key='company_name' AND value='My CRM'", ("QUEST FT",))
     if not conn.execute("SELECT 1 FROM users").fetchone():
@@ -421,6 +435,14 @@ def normalize(raw, kind, fy_start=1):
     d["presales_lead"] = clean_text(raw.get("presales_lead"), 80)
     d["region"] = clean_text(raw.get("region"), 80)
     d["source"] = clean_text(raw.get("source"), 80)
+    d["product"] = clean_text(raw.get("product"), 120)
+    ot = clean_text(raw.get("offering_type"), 40)
+    if ot:
+        ot_norm = {"product": "Product", "products": "Product", "service": "Service", "services": "Service"}.get(ot.lower())
+        if not ot_norm:
+            errors.append(f"Product / Service must be 'Product' or 'Service' (got '{ot}')")
+        ot = ot_norm
+    d["offering_type"] = ot
     d["notes"] = clean_text(raw.get("notes"), 2000)
     email = clean_text(raw.get("email"), 200)
     if email and not EMAIL_RE.match(email):
@@ -466,7 +488,7 @@ def normalize(raw, kind, fy_start=1):
 
 
 COLS = ["type", "company", "contact_name", "email", "phone", "owner", "presales_lead", "region",
-        "source", "stage",
+        "product", "offering_type", "source", "stage",
         "probability", "expected_close", "value", "value_usd", "closed_date", "closed_quarter", "notes"]
 
 
@@ -483,6 +505,21 @@ def insert_record(conn, d, uid):
 
 def update_record(conn, rid, d, uid):
     conn.execute(UPDATE_SQL, [d.get(c) for c in COLS] + [iso(utcnow()), uid, rid])
+
+
+# --------------------------------------------------------------------------- product master
+def product_map(conn):
+    """lower-case name -> canonical name, for every product in the master (active or not)."""
+    return {r["name"].lower(): r["name"] for r in conn.execute("SELECT name FROM products")}
+
+
+def active_products(conn):
+    return [r["name"] for r in conn.execute("SELECT name FROM products WHERE active=1 ORDER BY lower(name)")]
+
+
+def add_product(conn, name):
+    conn.execute("INSERT INTO products(name,active,created_at) VALUES(?,1,?) ON CONFLICT DO NOTHING",
+                 (name, iso(utcnow())))
 
 
 # --------------------------------------------------------------------------- Excel import/export
@@ -507,6 +544,11 @@ HEADER_ALIASES = {
     "presales_lead": ["presales lead", "pre-sales lead", "pre sales lead", "presales", "pre-sales",
                       "presales owner", "presales engineer", "presales consultant", "presales resource",
                       "presales spoc", "pre-sales spoc", "presales name"],
+    "product": ["product", "product name", "products", "product interested", "product / solution",
+                "product/solution", "solution", "product or service name", "service name", "offering"],
+    "offering_type": ["product / service", "product/service", "product or service", "product / service type",
+                      "offering type", "product type", "service type", "product service", "prod / service",
+                      "product-service"],
     "region": ["region", "country", "region/country", "region / country", "region or country",
                "country/region", "country / region", "geo", "geography", "territory", "location"],
 }
@@ -574,6 +616,8 @@ def import_workbook(conn, fileobj, fy_start, update_existing, dry_run, uid):
     for r in conn.execute("SELECT id, type, company, email FROM records"):
         known[(r["type"], (r["company"] or "").lower(), (r["email"] or "").lower())] = r["id"]
     inserts, updates, total_rows, limit_hit = [], [], 0, False
+    pmap = product_map(conn)
+    res["new_products"] = []
     now = iso(utcnow())
     for ws in wb.worksheets:
         name, low = ws.title, ws.title.lower()
@@ -614,6 +658,14 @@ def import_workbook(conn, fileobj, fy_start, update_existing, dry_run, uid):
                 res["errors"].append((name, idx, "; ".join(errs)))
                 continue
             key = (k, d["company"].lower(), (d["email"] or "").lower())
+            if key in known and (known[key] is None or not update_existing):
+                pass
+            elif d["product"]:      # use the master's spelling; unknown products are added to the master
+                canon = pmap.get(d["product"].lower())
+                if canon is None:
+                    pmap[d["product"].lower()] = canon = d["product"]
+                    res["new_products"].append(canon)
+                d["product"] = canon
             if key in known:
                 rid = known[key]
                 if rid is None:
@@ -634,6 +686,8 @@ def import_workbook(conn, fileobj, fy_start, update_existing, dry_run, uid):
             break
     wb.close()
     if not dry_run:
+        for nm in res["new_products"]:
+            add_product(conn, nm)
         if inserts:
             conn.executemany(INSERT_SQL, inserts)
         if updates:
@@ -662,14 +716,14 @@ def style_header(ws, widths):
 
 
 PROSPECT_HEADERS = ["Company*", "Contact Name", "Email", "Phone", "Owner", "Presales Lead",
-                    "Region / Country", "Source", "Stage",
+                    "Region / Country", "Product", "Product / Service", "Source", "Stage",
                     "Probability (%)", "Expected Close Date", "Expected Value (INR)", "Expected Value (USD)", "Notes"]
 CLIENT_HEADERS = ["Company*", "Contact Name", "Email", "Phone", "Owner", "Presales Lead",
-                  "Region / Country", "Source",
+                  "Region / Country", "Product", "Product / Service", "Source",
                   "Closed Date", "Closed Quarter", "Deal Value (INR)", "Deal Value (USD)", "Notes"]
 
 
-def build_template():
+def build_template(products=()):
     wb = Workbook()
     info = wb.active
     info.title = "Instructions"
@@ -679,6 +733,8 @@ def build_template():
         "Fill the 'Prospects' sheet for open opportunities and the 'Clients' sheet for converted customers.",
         "Keep the header row. Columns marked * are required. Delete nothing but the data rows you do not need.",
         "Amounts: put the rupee amount in the (INR) column and the dollar amount in the (USD) column. Either can be left blank; nothing is converted.",
+        "Product: use one of the names in the Product master (admins manage it). A new name in the file is added to the master automatically.",
+        "Product / Service: Product or Service.",
         "Region / Country and Presales Lead are free text - spell them the same way every time (India, UAE, USA...) so reports group correctly.",
         "",
         f"Prospects - Stage must be one of: {', '.join(STAGES)} (blank = Lead).",
@@ -694,17 +750,27 @@ def build_template():
     info.column_dimensions["A"].width = 110
     ws = wb.create_sheet("Prospects")
     ws.append(PROSPECT_HEADERS)
-    style_header(ws, [28, 22, 28, 16, 16, 18, 18, 16, 14, 14, 20, 20, 20, 40])
+    style_header(ws, [28, 22, 28, 16, 16, 18, 18, 24, 16, 16, 14, 14, 20, 20, 20, 40])
     dv = DataValidation(type="list", formula1='"' + ",".join(STAGES) + '"', allow_blank=True)
     ws.add_data_validation(dv)
-    dv.add("I2:I2000")
+    dv.add("K2:K2000")
     for r in range(2, 2001):
-        ws.cell(row=r, column=11).number_format = "DD-MM-YYYY"
+        ws.cell(row=r, column=13).number_format = "DD-MM-YYYY"
     ws2 = wb.create_sheet("Clients")
     ws2.append(CLIENT_HEADERS)
-    style_header(ws2, [28, 22, 28, 16, 16, 18, 18, 16, 16, 16, 18, 18, 40])
+    style_header(ws2, [28, 22, 28, 16, 16, 18, 18, 24, 16, 16, 16, 16, 18, 18, 40])
     for r in range(2, 2001):
-        ws2.cell(row=r, column=9).number_format = "DD-MM-YYYY"
+        ws2.cell(row=r, column=11).number_format = "DD-MM-YYYY"
+    plist = ",".join(products)
+    for sheet in (ws, ws2):
+        dvt = DataValidation(type="list", formula1='"Product,Service"', allow_blank=True)
+        sheet.add_data_validation(dvt)
+        dvt.add("I2:I2000")
+        if products and len(plist) < 250:     # Excel limits inline lists to 255 characters
+            dvp = DataValidation(type="list", formula1='"' + plist.replace('"', "") + '"', allow_blank=True,
+                                 showErrorMessage=False)    # warn-free: new products may be typed
+            sheet.add_data_validation(dvp)
+            dvp.add("H2:H2000")
     out = io.BytesIO()
     wb.save(out)
     out.seek(0)
@@ -719,15 +785,17 @@ def build_export(conn):
     for r in conn.execute("SELECT * FROM records WHERE type='prospect' ORDER BY lower(company)"):
         ws.append([xl_safe(x) for x in (
             r["company"], r["contact_name"], r["email"], r["phone"], r["owner"], r["presales_lead"],
-            r["region"], r["source"], r["stage"], r["probability"], r["expected_close"], r["value"], r["value_usd"], r["notes"])])
-    style_header(ws, [28, 22, 28, 16, 16, 18, 18, 16, 14, 14, 20, 20, 20, 40])
+            r["region"], r["product"], r["offering_type"], r["source"], r["stage"], r["probability"],
+            r["expected_close"], r["value"], r["value_usd"], r["notes"])])
+    style_header(ws, [28, 22, 28, 16, 16, 18, 18, 24, 16, 16, 14, 14, 20, 20, 20, 40])
     ws2 = wb.create_sheet("Clients")
     ws2.append(CLIENT_HEADERS)
     for r in conn.execute("SELECT * FROM records WHERE type='client' ORDER BY lower(company)"):
         ws2.append([xl_safe(x) for x in (
             r["company"], r["contact_name"], r["email"], r["phone"], r["owner"], r["presales_lead"],
-            r["region"], r["source"], r["closed_date"], r["closed_quarter"], r["value"], r["value_usd"], r["notes"])])
-    style_header(ws2, [28, 22, 28, 16, 16, 18, 18, 16, 16, 16, 18, 18, 40])
+            r["region"], r["product"], r["offering_type"], r["source"], r["closed_date"], r["closed_quarter"],
+            r["value"], r["value_usd"], r["notes"])])
+    style_header(ws2, [28, 22, 28, 16, 16, 18, 18, 24, 16, 16, 16, 16, 18, 18, 40])
     out = io.BytesIO()
     wb.save(out)
     out.seek(0)
@@ -783,7 +851,7 @@ def dashboard_data(conn, cfg):
 
 def breakdown(conn, field):
     """Pipeline + client summary grouped by a free-text field, ignoring upper/lower-case differences."""
-    assert field in ("region", "presales_lead")
+    assert field in ("region", "presales_lead", "product", "offering_type")
     groups = {}
     for r in conn.execute(f"SELECT {field} f, type, stage, value, value_usd, probability FROM records").fetchall():
         label = (r["f"] or "").strip()
@@ -855,6 +923,7 @@ def group_series(items, field, top=8):
 
 DQ_FIELDS = [("expected_close", "Likely closure date", True, False), ("owner", "Sales owner", True, True),
              ("presales_lead", "Presales lead", True, True), ("region", "Region / Country", True, True),
+             ("product", "Product", True, True), ("offering_type", "Product / Service", True, True),
              ("value", "Amount (INR)", True, True), ("value_usd", "Amount (USD)", True, True),
              ("source", "Lead source", True, True), ("closed_date", "Closed date", False, True)]
 MISSING_FIELDS = tuple(f[0] for f in DQ_FIELDS)
@@ -866,7 +935,7 @@ def analytics_data(conn, cfg):
     now = utcnow()
     rows = conn.execute(
         "SELECT id, type, company, stage, probability, expected_close, value, value_usd, closed_date, closed_quarter, "
-        "owner, source, region, presales_lead, created_at, updated_at FROM records").fetchall()
+        "owner, source, region, presales_lead, product, offering_type, created_at, updated_at FROM records").fetchall()
     prospects = [r for r in rows if r["type"] == "prospect"]
     opens = [r for r in prospects if r["stage"] != "Lost"]
     lost = [r for r in prospects if r["stage"] == "Lost"]
@@ -967,14 +1036,20 @@ def analytics_data(conn, cfg):
                "won": [x["clients"] for x in br], "lost": [x["lost"] for x in br]}
 
     region_s, source_s = group_series(opens, "region"), group_series(opens, "source")
-    charts = {"stages": stages, "forecast": forecast, "won": won, "prob": prob, "size": size, "added": added,
+    by_product = breakdown(conn, "product")
+    pw = [x for x in by_product if x["clients"] + x["lost"] > 0 and not x["unset"]][:8]
+    prodwin = {"labels": [x["name"] for x in pw], "rate": [x["win_rate"] or 0 for x in pw],
+               "won": [x["clients"] for x in pw], "lost": [x["lost"] for x in pw]}
+    product_s = group_series(opens, "product")
+    charts = {"product": product_s, "offering": group_series(opens, "offering_type"),
+              "prodwon": group_series(clients, "product"), "prodwin": prodwin,"stages": stages, "forecast": forecast, "won": won, "prob": prob, "size": size, "added": added,
               "winrate": winrate, "region": region_s, "source": source_s,
               "presales": group_series(opens, "presales_lead"), "owner": group_series(opens, "owner")}
 
     # ---- lists
     def row(r, extra=None):
         d = {k: r[k] for k in ("id", "company", "stage", "probability", "expected_close", "value", "value_usd",
-                               "region", "presales_lead", "owner")}
+                               "region", "presales_lead", "owner", "product", "offering_type")}
         d.update(extra or {})
         return d
     top_inr = [row(r) for r in sorted([r for r in opens if r["value"]], key=inr, reverse=True)[:8]]
@@ -1000,6 +1075,11 @@ def analytics_data(conn, cfg):
             hi.append(("warn" if share >= 50 else "info",
                        f"The top 3 deals make up {share}% of the open pipeline"
                        + (" – a few slipping would hurt the forecast." if share >= 50 else ".")))
+        pv = product_s["inr"] if pipe["inr"] else product_s["usd"]
+        prod = [(l, v) for l, v in zip(product_s["labels"], pv) if l not in ("(not set)", "Other")]
+        if prod and sum(pv):
+            l, v = max(prod, key=lambda x: x[1])
+            hi.append(("info", f"{l} leads the open pipeline by product – {pct(v, sum(pv))}% of the total."))
         rv = region_s["inr"] if pipe["inr"] else region_s["usd"]
         reg = [(l, v) for l, v in zip(region_s["labels"], rv) if l not in ("(not set)", "Other")]
         if reg and sum(rv):
@@ -1023,15 +1103,24 @@ def analytics_data(conn, cfg):
         "avg_inr": pipe["inr"] / n_inr if n_inr else 0, "avg_usd": pipe["usd"] / n_usd if n_usd else 0,
         "won_q": sums(won_q), "cur_q": cur_q, "clients": sums(clients), "lost_n": len(lost), "win_rate": win_rate,
         "overdue_n": len(overdue), "stale_n": len(stale), "nodate_n": len(nodate),
+        "by_product": by_product, "by_offering": breakdown(conn, "offering_type"),
         "charts": charts, "top_inr": top_inr, "top_usd": top_usd, "stale": stale_rows, "dq": dq, "highlights": hi,
     }
 
 
 def distinct_values(field):
     """Existing values, used to suggest consistent spellings in the entry form."""
-    assert field in ("region", "presales_lead", "owner", "source")
+    assert field in ("region", "presales_lead", "owner", "source", "product")
     return [r[0] for r in g.db.execute(
         f"SELECT DISTINCT {field} FROM records WHERE {field} IS NOT NULL AND {field}<>'' ORDER BY 1")]
+
+
+def product_choices(current=None):
+    """Active products for dropdowns, plus the record's current value if it was since deactivated."""
+    names = active_products(g.db)
+    if current and current.lower() not in {n.lower() for n in names}:
+        names.append(current)
+    return names
 
 
 def report_data(conn, cfg):
@@ -1065,7 +1154,8 @@ def report_data(conn, cfg):
     by_source = sorted(by_source, key=lambda r: (-(r["p"] + r["c"]), r["s"]))
     return {"won": won, "forecast": sorted(forecast.values(), key=lambda x: x["q"]),
             "by_owner": by_owner, "by_source": by_source,
-            "by_region": breakdown(conn, "region"), "by_presales": breakdown(conn, "presales_lead")}
+            "by_region": breakdown(conn, "region"), "by_presales": breakdown(conn, "presales_lead"),
+            "by_product": breakdown(conn, "product"), "by_offering": breakdown(conn, "offering_type")}
 
 
 # --------------------------------------------------------------------------- e-mail reminders
@@ -1192,7 +1282,7 @@ def build_reminder(conn, cfg):
              "<tr style='background:#1f3a5f;color:#fff'><th align='left'>Company</th><th align='left'>Contact</th>"
              "<th align='left'>Stage</th><th>Prob.</th><th align='left'>Expected close</th>"
              "<th align='right'>Value (INR / USD)</th><th align='left'>Owner</th><th align='left'>Presales</th>"
-             "<th align='left'>Region</th></tr>")
+             "<th align='left'>Region</th><th align='left'>Product</th></tr>")
     for r in rows:
         flag = ""
         if r["expected_close"] and r["expected_close"] < today.isoformat():
@@ -1201,16 +1291,18 @@ def build_reminder(conn, cfg):
             flag = " [no date]"
         t.append(f"  - {r['company']} | {r['contact_name'] or '-'} | {r['stage']} | {r['probability']}% | "
                  f"{fmt_date(r['expected_close'])}{flag} | {fmt_amt(r['value'], r['value_usd'])} | {r['owner'] or '-'} | "
-                 f"presales: {r['presales_lead'] or '-'} | {r['region'] or '-'}")
+                 f"presales: {r['presales_lead'] or '-'} | {r['region'] or '-'} | "
+                 f"{r['product'] or '-'}{' (' + r['offering_type'] + ')' if r['offering_type'] else ''}")
         color = "#b42318" if "OVERDUE" in flag else "#333"
         h.append(f"<tr style='border-bottom:1px solid #eee;color:{color}'><td>{e(r['company'])}</td>"
                  f"<td>{e(r['contact_name'] or '-')}</td><td>{e(r['stage'])}</td><td align='center'>{r['probability']}%</td>"
                  f"<td>{fmt_date(r['expected_close'])}{e(flag)}</td><td align='right'>{fmt_amt(r['value'], r['value_usd'])}</td>"
                  f"<td>{e(r['owner'] or '-')}</td><td>{e(r['presales_lead'] or '-')}</td>"
-                 f"<td>{e(r['region'] or '-')}</td></tr>")
+                 f"<td>{e(r['region'] or '-')}</td>"
+                 f"<td>{e(r['product'] or '-')}{e(' (' + r['offering_type'] + ')') if r['offering_type'] else ''}</td></tr>")
     if not rows:
         t.append("  No open prospects.")
-        h.append("<tr><td colspan='9'>No open prospects.</td></tr>")
+        h.append("<tr><td colspan='10'>No open prospects.</td></tr>")
     h.append("</table><p style='color:#888;font-size:12px'>Sent automatically by your CRM.</p>")
     return subject, "\n".join(t), "".join(h)
 
@@ -1317,7 +1409,9 @@ def csrf_token():
 app.jinja_env.globals.update(csrf_token=csrf_token, STAGES=STAGES, OPEN_STAGES=OPEN_STAGES,
                              DAYS=DAYS, DEFAULT_PROB=DEFAULT_PROB, ON_VERCEL=ON_VERCEL,
                              ASSET_V=(os.environ.get("VERCEL_GIT_COMMIT_SHA") or "3")[:8],
-                             distinct=lambda f: distinct_values(f))
+                             distinct=lambda f: distinct_values(f),
+                             product_choices=lambda cur=None: product_choices(cur),
+                             OFFERING_TYPES=OFFERING_TYPES)
 
 
 @app.template_filter("fdate")
@@ -1531,8 +1625,8 @@ def records():
     where, args = ["type=?"], [kind]
     if q:
         where.append("(" + " OR ".join(f"{c} {LIKE_OP} ?" for c in (
-            "company", "contact_name", "email", "owner", "presales_lead", "region")) + ")")
-        args += [f"%{q}%"] * 6
+            "company", "contact_name", "email", "owner", "presales_lead", "region", "product")) + ")")
+        args += [f"%{q}%"] * 7
     if kind == "prospect" and stage in STAGES:
         where.append("stage=?")
         args.append(stage)
@@ -1558,10 +1652,23 @@ def records():
 def save_from_form(rid=None):
     kind = "client" if request.form.get("type") == "client" else "prospect"
     raw = {k: request.form.get(k) for k in
-           ("company", "contact_name", "email", "phone", "owner", "presales_lead", "region", "source",
+           ("company", "contact_name", "email", "phone", "owner", "presales_lead", "region", "product",
+            "offering_type", "source",
             "stage", "probability",
             "expected_close", "value", "value_usd", "closed_date", "closed_quarter", "notes")}
     d, errors = normalize(raw, kind, int(g.cfg["fy_start_month"]))
+    if d.get("product"):
+        pm = product_map(g.db)
+        canon = pm.get(d["product"].lower())
+        keep = None
+        if rid:
+            old = g.db.execute("SELECT product FROM records WHERE id=?", (rid,)).fetchone()
+            keep = (old["product"] or "").lower() if old else None
+        active = {n.lower() for n in active_products(g.db)}
+        if canon is None or (canon.lower() not in active and canon.lower() != keep):
+            errors.append("Product: pick one from the list (an admin can add products under Product master)")
+        else:
+            d["product"] = canon
     if errors:
         for e in errors:
             flash(e, "error")
@@ -1658,7 +1765,7 @@ def data_page():
 @app.route("/template.xlsx")
 @login_required
 def download_template():
-    return send_file(build_template(), as_attachment=True, download_name="crm_import_template.xlsx",
+    return send_file(build_template(active_products(g.db)), as_attachment=True, download_name="crm_import_template.xlsx",
                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
@@ -1817,6 +1924,91 @@ def audit_view():
 
 
 # ---- admin: delete data
+# ---- admin: product master
+def product_rows():
+    use = {}
+    for r in g.db.execute("SELECT lower(product) p, type, COUNT(*) n FROM records "
+                          "WHERE product IS NOT NULL AND product<>'' GROUP BY 1, 2"):
+        use.setdefault(r["p"], {"prospect": 0, "client": 0})[r["type"]] = r["n"]
+    rows = []
+    for r in g.db.execute("SELECT * FROM products ORDER BY active DESC, lower(name)"):
+        u = use.get(r["name"].lower(), {"prospect": 0, "client": 0})
+        rows.append({"id": r["id"], "name": r["name"], "active": r["active"],
+                     "prospects": u["prospect"], "clients": u["client"]})
+    return rows
+
+
+@app.route("/admin/products", methods=["GET", "POST"])
+@admin_required
+def products():
+    if request.method == "POST":
+        name = clean_text(request.form.get("name"), 120)
+        if not name:
+            flash("Enter a product name.", "error")
+        elif name.lower() in product_map(g.db):
+            flash(f"'{name}' is already in the list.", "error")
+        else:
+            add_product(g.db, name)
+            audit(g.db, g.user["username"], "product_added", name)
+            g.db.commit()
+            flash(f"'{name}' added – it now appears in the product dropdown.", "ok")
+            return redirect(url_for("products"))
+    return render_template("products.html", rows=product_rows())
+
+
+def _product_or_404(pid):
+    row = g.db.execute("SELECT * FROM products WHERE id=?", (pid,)).fetchone()
+    if not row:
+        abort(404)
+    return row
+
+
+@app.route("/admin/products/<int:pid>/rename", methods=["POST"])
+@admin_required
+def product_rename(pid):
+    row = _product_or_404(pid)
+    new = clean_text(request.form.get("name"), 120)
+    clash = product_map(g.db).get((new or "").lower())
+    if not new:
+        flash("Enter a product name.", "error")
+    elif clash and clash != row["name"] and new.lower() != row["name"].lower():
+        flash(f"'{new}' already exists.", "error")
+    elif new != row["name"]:
+        g.db.execute("UPDATE products SET name=? WHERE id=?", (new, pid))
+        n = g.db.execute("UPDATE records SET product=? WHERE lower(product)=lower(?)",
+                         (new, row["name"])).rowcount
+        audit(g.db, g.user["username"], "product_renamed", f"{row['name']} -> {new} ({n} record(s))")
+        g.db.commit()
+        flash(f"Renamed to '{new}' ({n} record(s) updated).", "ok")
+    return redirect(url_for("products"))
+
+
+@app.route("/admin/products/<int:pid>/toggle", methods=["POST"])
+@admin_required
+def product_toggle(pid):
+    row = _product_or_404(pid)
+    g.db.execute("UPDATE products SET active=? WHERE id=?", (0 if row["active"] else 1, pid))
+    audit(g.db, g.user["username"], "product_disabled" if row["active"] else "product_enabled", row["name"])
+    g.db.commit()
+    flash(f"'{row['name']}' {'hidden from' if row['active'] else 'back in'} the dropdown.", "ok")
+    return redirect(url_for("products"))
+
+
+@app.route("/admin/products/<int:pid>/delete", methods=["POST"])
+@admin_required
+def product_delete(pid):
+    row = _product_or_404(pid)
+    used = g.db.execute("SELECT COUNT(*) FROM records WHERE lower(product)=lower(?)", (row["name"],)).fetchone()[0]
+    if used:
+        flash(f"'{row['name']}' is used by {used} record(s) – hide it instead of deleting.", "error")
+    else:
+        g.db.execute("DELETE FROM products WHERE id=?", (pid,))
+        audit(g.db, g.user["username"], "product_deleted", row["name"])
+        g.db.commit()
+        flash(f"'{row['name']}' deleted.", "ok")
+    return redirect(url_for("products"))
+
+
 DELETE_SCOPES = {"prospects": ("prospect",), "clients": ("client",), "all": ("prospect", "client")}
 
 

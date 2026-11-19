@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Product master{% endblock %}
+{% block content %}
+<div class="bar"><div class="grow"><h1>Product master</h1>
+  <p class="sub" style="margin:0">These are the values in the Product dropdown on prospects and clients. New products found in an Excel import are added here automatically.</p></div></div>
+
+<div class="card">
+  <h2>Add a product</h2>
+  <form method="post" class="bar" style="margin:0">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <input type="text" name="name" maxlength="120" placeholder="e.g. mPower Wealth" required style="max-width:320px">
+    <button type="submit">+ Add</button>
+  </form>
+</div>
+
+<div class="card flush"><div class="scroll"><table>
+  <tr><th>Product</th><th class="r">Prospects</th><th class="r">Clients</th><th>Status</th><th>Rename</th><th></th></tr>
+  {% for p in rows %}
+  <tr>
+    <td><strong>{{ p.name }}</strong></td>
+    <td class="r">{{ p.prospects }}</td><td class="r">{{ p.clients }}</td>
+    <td>{% if p.active %}<span class="pill on">in dropdown</span>{% else %}<span class="pill off">hidden</span>{% endif %}</td>
+    <td><form class="inline" method="post" action="{{ url_for('product_rename', pid=p.id) }}" style="display:flex;gap:6px">
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <input type="text" name="name" value="{{ p.name }}" maxlength="120" style="min-width:180px" aria-label="New name for {{ p.name }}">
+      <button class="alt sm" type="submit">Save</button></form></td>
+    <td style="white-space:nowrap">
+      <form class="inline" method="post" action="{{ url_for('product_toggle', pid=p.id) }}">
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+        <button class="alt sm" type="submit">{{ 'Hide' if p.active else 'Show' }}</button></form>
+      {% if not (p.prospects or p.clients) %}
+      <form class="inline" method="post" action="{{ url_for('product_delete', pid=p.id) }}" data-confirm="Delete {{ p.name }}?">
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}"><button class="danger sm" type="submit">Delete</button></form>
+      {% endif %}
+    </td>
+  </tr>
+  {% else %}<tr><td colspan="6" class="empty">No products yet.</td></tr>
+  {% endfor %}
+</table></div></div>
+<p class="muted">Renaming a product updates every record that uses it. A product that is in use can be hidden (so it stops appearing for new records) but not deleted.</p>
+{% endblock %}

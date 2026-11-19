@@ -57,6 +57,7 @@
       {% if g.user.role == 'admin' %}
       <div class="nav-h">Admin</div>
       <a href="{{ url_for('users') }}" class="{{ 'on' if ep in ('users','user_new','user_edit') }}"><svg class="i"><use href="#i-users"/></svg>Users</a>
+      <a href="{{ url_for('products') }}" class="{{ 'on' if ep == 'products' }}"><svg class="i"><use href="#i-layers"/></svg>Product master</a>
       <a href="{{ url_for('settings') }}" class="{{ 'on' if ep == 'settings' }}"><svg class="i"><use href="#i-sliders"/></svg>Settings</a>
       <a href="{{ url_for('audit_view') }}" class="{{ 'on' if ep == 'audit_view' }}"><svg class="i"><use href="#i-activity"/></svg>Activity</a>
       <a href="{{ url_for('danger_zone') }}" class="dng {{ 'on' if ep == 'danger_zone' }}"><svg class="i"><use href="#i-trash"/></svg>Delete data</a>

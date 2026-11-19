@@ -59,6 +59,34 @@
 </div>
 
 <div class="grid two">
+  <div class="card"><div class="card-h"><h2>Open pipeline by product</h2></div><div class="chart-box tall"><canvas id="c-product"></canvas></div></div>
+  <div class="card"><div class="card-h"><h2>Product vs service</h2><span class="muted">open pipeline</span></div><div class="chart-box"><canvas id="c-offering"></canvas></div></div>
+</div>
+
+<div class="grid two">
+  <div class="card"><div class="card-h"><h2>Closed-won by product</h2></div>
+    {% if a.clients.n %}<div class="chart-box"><canvas id="c-prodwon"></canvas></div>{% else %}<p class="empty">No clients yet.</p>{% endif %}</div>
+  <div class="card"><div class="card-h"><h2>Win rate by product</h2><span class="muted">won ÷ (won + lost)</span></div>
+    {% if a.charts.prodwin.labels %}<div class="chart-box"><canvas id="c-prodwin"></canvas></div>
+    {% else %}<p class="empty">No won or lost deals with a product yet.</p>{% endif %}</div>
+</div>
+
+<div class="card flush">
+  <div class="card-h" style="padding:18px 22px 0"><h2>Product scorecard</h2><span class="muted">open pipeline and wins per product</span></div>
+  {% if a.by_product %}<div class="scroll"><table>
+    <tr><th>Product</th><th class="r">Open prospects</th><th class="r">Pipeline</th><th class="r">Weighted</th><th class="r">Clients</th><th class="r">Won value</th><th class="r">Lost</th><th class="r">Win rate</th></tr>
+    {% for x in a.by_product %}<tr><td>{{ x.name }}</td><td class="r">{{ x.open_n }}</td>
+      <td class="r"><span class="only-inr">{{ x.open_value | money }}</span><span class="only-usd">{{ x.open_value_usd | usd }}</span></td>
+      <td class="r"><span class="only-inr">{{ x.weighted | money }}</span><span class="only-usd">{{ x.weighted_usd | usd }}</span></td>
+      <td class="r">{{ x.clients }}</td>
+      <td class="r"><span class="only-inr">{{ x.won_value | money }}</span><span class="only-usd">{{ x.won_value_usd | usd }}</span></td>
+      <td class="r">{{ x.lost }}</td><td class="r">{{ (x.win_rate ~ '%') if x.win_rate is not none else '–' }}</td></tr>{% endfor %}
+  </table></div>
+  <p class="muted" style="margin:10px 22px 16px;font-size:13px">“(not set)” = records with no product chosen. Product vs service split is in <a href="{{ url_for('reports') }}">Reports</a>.</p>
+  {% else %}<p class="empty">No data.</p>{% endif %}
+</div>
+
+<div class="grid two">
   <div class="card"><div class="card-h"><h2>Open pipeline by region / country</h2></div><div class="chart-box"><canvas id="c-region"></canvas></div></div>
   <div class="card"><div class="card-h"><h2>Open pipeline by lead source</h2></div><div class="chart-box"><canvas id="c-source"></canvas></div></div>
 </div>
