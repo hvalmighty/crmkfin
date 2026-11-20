@@ -25,49 +25,64 @@
   {% if missing %}<span class="chip">Missing: {{ missing_label }} <a href="{{ url_for('records', type=kind, q=q, stage=stage) }}" title="Remove this filter">&times;</a></span>{% endif %}
 </form>
 
+{% set PCOLS = [('product','Product'),('contact','Contact'),('stage','Stage'),('prob','Probability'),('close','Expected close'),('inr','Value (INR)'),('usd','Value (USD)'),('owner','Owner'),('presales','Presales lead'),('region','Region'),('source','Lead source')] %}
+{% set CCOLS = [('product','Product'),('contact','Contact'),('closed','Closed date'),('quarter','Quarter'),('inr','Deal value (INR)'),('usd','Deal value (USD)'),('owner','Owner'),('presales','Presales lead'),('region','Region'),('source','Lead source')] %}
+{% set COLS_ = PCOLS if kind == 'prospect' else CCOLS %}
+{% set DEFAULT_ON = ('product','stage','prob','close','inr','usd','owner','region') if kind == 'prospect' else ('product','closed','quarter','inr','usd','owner','region') %}
+<div class="colbar" style="display:flex;justify-content:flex-end;margin:-6px 0 12px">
+  <details class="colpick" id="colpick" data-kind="{{ kind }}" data-default="{{ DEFAULT_ON | join(',') }}">
+    <summary><svg class="i" style="width:16px;height:16px"><use href="#i-sliders"/></svg>Columns</summary>
+    <div class="panel">
+      {% for key, label in COLS_ %}<label><input type="checkbox" value="{{ key }}"> {{ label }}</label>{% endfor %}
+      <div class="foot"><button type="button" id="col-reset">Reset</button><button type="button" id="col-all">Show all</button></div>
+    </div>
+  </details>
+</div>
+<p class="col-hint" id="col-hint">The table is wider than your screen – use <strong>Columns</strong> to hide a few.</p>
+
 <div class="card flush">
 {% if rows %}
-<div class="scroll"><table>
+<div class="scroll" id="rec-scroll"><table class="rec" id="rec-table">
   {% if kind == 'prospect' %}
-  <tr><th>Company</th><th>Product</th><th>Contact</th><th>Stage</th><th class="c">Prob.</th><th>Expected close</th><th class="r">Value (INR)</th><th class="r">Value (USD)</th><th>Owner</th><th>Presales lead</th><th>Region</th><th></th></tr>
+  <tr><th>Company</th><th data-col="product">Product</th><th data-col="contact">Contact</th><th data-col="stage">Stage</th><th class="c" data-col="prob">Prob.</th><th data-col="close">Expected close</th><th class="r" data-col="inr">Value (INR)</th><th class="r" data-col="usd">Value (USD)</th><th data-col="owner">Owner</th><th data-col="presales">Presales lead</th><th data-col="region">Region</th><th data-col="source">Source</th><th></th></tr>
   {% for r in rows %}
   <tr class="{{ 'overdue' if r.expected_close and r.expected_close < today and r.stage != 'Lost' }}">
     <td><a href="{{ url_for('record_edit', rid=r.id) }}"><strong>{{ r.company }}</strong></a></td>
-    <td style="white-space:nowrap">{% if r.product %}{{ r.product }}{% if r.offering_type %}<br><span class="muted">{{ r.offering_type }}</span>{% endif %}{% elif r.offering_type %}<span class="muted">{{ r.offering_type }}</span>{% endif %}</td>
-    <td>{{ r.contact_name or '' }}{% if r.email %}<br><span class="muted">{{ r.email }}</span>{% endif %}</td>
-    <td><span class="pill {{ r.stage }}">{{ r.stage }}</span></td>
-    <td class="c">{{ r.probability }}%</td>
-    <td>{{ r.expected_close | fdate if r.expected_close else '–' }}</td>
-    <td class="r">{{ r.value | money if r.value is not none else '–' }}</td><td class="r">{{ r.value_usd | usd if r.value_usd is not none else '–' }}</td>
-    <td>{{ r.owner or '' }}</td><td>{{ r.presales_lead or '' }}</td><td>{{ r.region or '' }}</td>
-    <td style="white-space:nowrap">
-      <a class="btn alt sm" href="{{ url_for('record_edit', rid=r.id) }}">Edit</a>
-      <a class="btn alt sm" href="{{ url_for('record_edit', rid=r.id, convert=1) }}" title="Mark as converted client">Convert</a>
+    <td data-col="product">{% if r.product %}{{ r.product }}{% if r.offering_type %}<br><span class="muted">{{ r.offering_type }}</span>{% endif %}{% elif r.offering_type %}<span class="muted">{{ r.offering_type }}</span>{% endif %}</td>
+    <td data-col="contact">{{ r.contact_name or '' }}{% if r.email %}<br><span class="muted">{{ r.email }}</span>{% endif %}</td>
+    <td data-col="stage"><span class="pill {{ r.stage }}">{{ r.stage }}</span></td>
+    <td class="c" data-col="prob">{{ r.probability }}%</td>
+    <td data-col="close" style="white-space:nowrap">{{ r.expected_close | fdate if r.expected_close else '–' }}</td>
+    <td class="r" data-col="inr" style="white-space:nowrap">{{ r.value | money if r.value is not none else '–' }}</td><td class="r" data-col="usd" style="white-space:nowrap">{{ r.value_usd | usd if r.value_usd is not none else '–' }}</td>
+    <td data-col="owner">{{ r.owner or '' }}</td><td data-col="presales">{{ r.presales_lead or '' }}</td><td data-col="region">{{ r.region or '' }}</td><td data-col="source">{{ r.source or '' }}</td>
+    <td class="act"><div class="btns">
+      <a class="ib" href="{{ url_for('record_edit', rid=r.id) }}" title="Edit" aria-label="Edit {{ r.company }}"><svg class="i"><use href="#i-edit"/></svg></a>
+      <a class="ib" href="{{ url_for('record_edit', rid=r.id, convert=1) }}" title="Convert to client" aria-label="Convert {{ r.company }} to client"><svg class="i"><use href="#i-check"/></svg></a>
       {% if g.user.role == 'admin' %}
       <form class="inline" method="post" action="{{ url_for('record_delete', rid=r.id) }}" data-confirm="Delete {{ r.company }}? This cannot be undone.">
-        <input type="hidden" name="_csrf" value="{{ csrf_token() }}"><button class="danger sm" type="submit">Delete</button></form>
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}"><button class="ib danger" type="submit" title="Delete" aria-label="Delete {{ r.company }}"><svg class="i"><use href="#i-trash"/></svg></button></form>
       {% endif %}
-    </td>
+    </div></td>
   </tr>
   {% endfor %}
   {% else %}
-  <tr><th>Company</th><th>Product</th><th>Contact</th><th>Closed date</th><th>Quarter</th><th class="r">Deal value (INR)</th><th class="r">Deal value (USD)</th><th>Owner</th><th>Presales lead</th><th>Region</th><th></th></tr>
+  <tr><th>Company</th><th data-col="product">Product</th><th data-col="contact">Contact</th><th data-col="closed">Closed date</th><th data-col="quarter">Quarter</th><th class="r" data-col="inr">Deal value (INR)</th><th class="r" data-col="usd">Deal value (USD)</th><th data-col="owner">Owner</th><th data-col="presales">Presales lead</th><th data-col="region">Region</th><th data-col="source">Source</th><th></th></tr>
   {% for r in rows %}
   <tr>
     <td><a href="{{ url_for('record_edit', rid=r.id) }}"><strong>{{ r.company }}</strong></a></td>
-    <td style="white-space:nowrap">{% if r.product %}{{ r.product }}{% if r.offering_type %}<br><span class="muted">{{ r.offering_type }}</span>{% endif %}{% elif r.offering_type %}<span class="muted">{{ r.offering_type }}</span>{% endif %}</td>
-    <td>{{ r.contact_name or '' }}{% if r.email %}<br><span class="muted">{{ r.email }}</span>{% endif %}</td>
-    <td>{{ r.closed_date | fdate if r.closed_date else '–' }}</td>
-    <td>{{ r.closed_quarter or '–' }}</td>
-    <td class="r">{{ r.value | money if r.value is not none else '–' }}</td><td class="r">{{ r.value_usd | usd if r.value_usd is not none else '–' }}</td>
-    <td>{{ r.owner or '' }}</td><td>{{ r.presales_lead or '' }}</td><td>{{ r.region or '' }}</td>
-    <td style="white-space:nowrap">
-      <a class="btn alt sm" href="{{ url_for('record_edit', rid=r.id) }}">Edit</a>
+    <td data-col="product">{% if r.product %}{{ r.product }}{% if r.offering_type %}<br><span class="muted">{{ r.offering_type }}</span>{% endif %}{% elif r.offering_type %}<span class="muted">{{ r.offering_type }}</span>{% endif %}</td>
+    <td data-col="contact">{{ r.contact_name or '' }}{% if r.email %}<br><span class="muted">{{ r.email }}</span>{% endif %}</td>
+    <td data-col="closed" style="white-space:nowrap">{{ r.closed_date | fdate if r.closed_date else '–' }}</td>
+    <td data-col="quarter" style="white-space:nowrap">{{ r.closed_quarter or '–' }}</td>
+    <td class="r" data-col="inr" style="white-space:nowrap">{{ r.value | money if r.value is not none else '–' }}</td><td class="r" data-col="usd" style="white-space:nowrap">{{ r.value_usd | usd if r.value_usd is not none else '–' }}</td>
+    <td data-col="owner">{{ r.owner or '' }}</td><td data-col="presales">{{ r.presales_lead or '' }}</td><td data-col="region">{{ r.region or '' }}</td><td data-col="source">{{ r.source or '' }}</td>
+    <td class="act"><div class="btns">
+      <a class="ib" href="{{ url_for('record_edit', rid=r.id) }}" title="Edit" aria-label="Edit {{ r.company }}"><svg class="i"><use href="#i-edit"/></svg></a>
       {% if g.user.role == 'admin' %}
       <form class="inline" method="post" action="{{ url_for('record_delete', rid=r.id) }}" data-confirm="Delete {{ r.company }}? This cannot be undone.">
-        <input type="hidden" name="_csrf" value="{{ csrf_token() }}"><button class="danger sm" type="submit">Delete</button></form>
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}"><button class="ib danger" type="submit" title="Delete" aria-label="Delete {{ r.company }}"><svg class="i"><use href="#i-trash"/></svg></button></form>
       {% endif %}
-    </td>
+    </div></td>
   </tr>
   {% endfor %}
   {% endif %}

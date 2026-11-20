@@ -121,3 +121,8 @@ IRIS is a read-only assistant in the floating button at the bottom-right of ever
 - Put the **Vercel function region** and the **database region** in the same place (Vercel → Settings → Functions → Region; the database region is in the host name of `DATABASE_URL`, e.g. `…ap-southeast-1.aws.neon.tech`). Every page makes a few database round-trips, so distance matters most.
 - Use the database's **pooled** connection string. Free databases (e.g. Neon) go to sleep when idle; the first request after a pause is slow while it wakes up (the app retries automatically).
 - After changing the schema, bump `SCHEMA_VERSION` in `app.py` so existing databases are upgraded once; otherwise a cold start is a single query.
+
+## Screen layout
+
+- **Collapsible menu:** the ☰ button at the top-left folds the sidebar into an icon-only strip (remembered per browser). On phones it slides over the page instead.
+- **Choose your columns:** on Prospects and Clients, the **Columns** button lets each user tick which columns to show (Product, Contact, Stage, Probability, Expected close, INR, USD, Owner, Presales lead, Region, Lead source). The choice is remembered in that browser, separately for prospects and clients, and **Reset** restores the defaults. If the table is still wider than the screen, a hint says so.

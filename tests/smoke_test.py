@@ -341,7 +341,7 @@ check("export has product columns", vals["Prod Co"][hdr.index("Product")].value 
 check("export keeps stage/value in place", vals["Prod Co"][hdr.index("Stage")].value == "Proposal" and vals["Prod Co"][hdr.index("Expected Value (INR)")].value == 1000000)
 # lists, search, missing filter
 lp = c.get("/records?type=prospect").get_data(as_text=True)
-check("list shows Product column + value", "<th>Product</th>" in lp and "mPower Wealth" in lp)
+check("list shows Product column + value", 'data-col="product">Product</th>' in lp and "mPower Wealth" in lp)
 check("search by product", b"Prod Co" in c.get("/records?type=prospect&q=mpower").data)
 r = c.get("/records?type=prospect&stage=open&missing=product")
 check("missing product filter", r.status_code == 200 and b"Prod Co" not in r.data and b"Acme Ltd" in r.data)
