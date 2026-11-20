@@ -199,8 +199,9 @@ def _pg_row_factory(cursor):
 class DB:
     """Thin wrapper so the rest of the code can use `?` placeholders on SQLite and PostgreSQL."""
 
-    def __init__(self, conn):
+    def __init__(self, conn, pooled=False):
         self.conn = conn
+        self.pooled = pooled
 
     @staticmethod
     def _pg(sql):
@@ -225,14 +226,58 @@ class DB:
         self.conn.rollback()
 
     def close(self):
-        self.conn.close()
+        if not self.pooled:
+            self.conn.close()
+            return
+        try:                      # keep the connection for the next request, but end this request's transaction
+            self.conn.rollback()
+        except Exception:
+            _tls.conn = None
+            try:
+                self.conn.close()
+            except Exception:
+                pass
 
 
-def connect():
+_tls = threading.local()      # one reusable PostgreSQL connection per thread (web requests only)
+IDLE_PING_SECONDS = 20
+
+
+def _new_pg():
+    """Open a PostgreSQL connection. Retries: a sleeping serverless DB (e.g. Neon free tier) can refuse the
+    very first connection while it wakes up - that used to show up as a page that only loaded after a refresh."""
+    last = None
+    for delay in (0, 1.0, 2.5):
+        if delay:
+            time.sleep(delay)
+        try:
+            # prepare_threshold=None: works behind pgbouncer / Neon's pooled connection string.
+            return psycopg.connect(DATABASE_URL, row_factory=_pg_row_factory, prepare_threshold=None, connect_timeout=10)
+        except psycopg.OperationalError as e:
+            last = e
+    raise last
+
+
+def connect(reuse=False):
+    """reuse=True (web requests): keep the PostgreSQL connection open between requests handled by the same
+    warm instance, which saves the TCP + TLS + login round-trips on every page."""
     if USE_PG:
-        # prepare_threshold=None: works behind pgbouncer / Neon's pooled connection string.
-        return DB(psycopg.connect(DATABASE_URL, row_factory=_pg_row_factory,
-                                  prepare_threshold=None, connect_timeout=15))
+        if not reuse:
+            return DB(_new_pg())
+        c = getattr(_tls, "conn", None)
+        if c is not None and not c.closed:
+            if time.time() - getattr(_tls, "used", 0) > IDLE_PING_SECONDS:
+                try:                      # connection may have been dropped while the instance was idle
+                    c.execute("SELECT 1")
+                    c.rollback()
+                except Exception:
+                    c = None
+        else:
+            c = None
+        if c is None:
+            c = _tls.conn = _new_pg()
+        _tls.used = time.time()
+        return DB(c, pooled=True)
     os.makedirs(DATA_DIR, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
@@ -244,11 +289,23 @@ def connect():
 def get_settings(conn):
     cfg = dict(SETTING_DEFAULTS)
     for r in conn.execute("SELECT key, value FROM settings"):
-        cfg[r["key"]] = r["value"]
+        if not r["key"].startswith("_"):
+            cfg[r["key"]] = r["value"]
     return cfg
 
 
+_cfg_cache = {"t": 0.0, "v": None}
+CFG_TTL = 15      # seconds a warm instance re-uses the settings (saves one database round-trip per page)
+
+
+def cached_settings(conn):
+    if _cfg_cache["v"] is None or time.time() - _cfg_cache["t"] > CFG_TTL:
+        _cfg_cache.update(v=get_settings(conn), t=time.time())
+    return dict(_cfg_cache["v"])
+
+
 def set_setting(conn, key, value):
+    _cfg_cache["v"] = None
     conn.execute("INSERT INTO settings(key,value) VALUES(?,?) "
                  "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(value)))
 
@@ -285,7 +342,29 @@ def migrate(conn):
             conn.execute(f"ALTER TABLE records ADD COLUMN {col} {typ}")
 
 
+# Bump this whenever the schema / migrations / seed data change, so existing databases get upgraded once.
+SCHEMA_VERSION = "2026-11-20.1"
+
+
+def schema_is_current():
+    """One cheap query on a cold start instead of ~20 setup statements."""
+    conn = connect()
+    try:
+        r = conn.execute("SELECT value FROM settings WHERE key='_schema'").fetchone()
+        return bool(r) and r["value"] == SCHEMA_VERSION
+    except Exception:
+        return False                    # table doesn't exist yet -> first run
+    finally:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        conn.close()
+
+
 def init_db():
+    if schema_is_current():
+        return
     conn = connect()
     if USE_PG:   # serialise concurrent cold starts
         conn.execute("SELECT pg_advisory_xact_lock(7242026)")
@@ -315,6 +394,7 @@ def init_db():
               f"  password: {pw if generated else '(from CRM_ADMIN_PASSWORD)'}\n"
               f"  You must change the password at first login.\n{banner}\n",
               file=sys.stderr, flush=True)
+    set_setting(conn, "_schema", SCHEMA_VERSION)
     conn.commit()
     conn.close()
 
@@ -822,41 +902,39 @@ def funnel(conn):
 
 
 def dashboard_data(conn, cfg):
-    fy = int(cfg["fy_start_month"])
+    """Funnel + overdue / upcoming lists (client and won-quarter totals come from analytics_data)."""
     stages, lost = funnel(conn)
     today = datetime.now(TZ).date()
-    clients = conn.execute("SELECT COUNT(*) c, COALESCE(SUM(value),0) v, COALESCE(SUM(value_usd),0) vu "
-                           "FROM records WHERE type='client'").fetchone()
-    cur_q = quarter_label(today, fy)
-    won_q = conn.execute("SELECT COUNT(*) c, COALESCE(SUM(value),0) v, COALESCE(SUM(value_usd),0) vu FROM records "
-                         "WHERE type='client' AND closed_quarter=?", (cur_q,)).fetchone()
     open_n = sum(s["count"] for s in stages)
-    total = clients["c"] + lost
-    overdue = conn.execute(
-        "SELECT * FROM records WHERE type='prospect' AND stage!='Lost' AND expected_close < ? "
-        "ORDER BY expected_close", (today.isoformat(),)).fetchall()
-    upcoming = conn.execute(
-        "SELECT * FROM records WHERE type='prospect' AND stage!='Lost' AND expected_close BETWEEN ? AND ? "
-        "ORDER BY expected_close", (today.isoformat(), (today + timedelta(days=30)).isoformat())).fetchall()
-    no_date = conn.execute("SELECT COUNT(*) c FROM records WHERE type='prospect' AND stage!='Lost' "
-                           "AND expected_close IS NULL").fetchone()["c"]
+    # one query for both lists: everything not yet closed with a date up to 30 days ahead
+    rows = conn.execute(
+        "SELECT * FROM records WHERE type='prospect' AND stage!='Lost' AND expected_close <= ? "
+        "ORDER BY expected_close", ((today + timedelta(days=30)).isoformat(),)).fetchall()
+    overdue = [r for r in rows if r["expected_close"] < today.isoformat()]
+    upcoming = [r for r in rows if r["expected_close"] >= today.isoformat()]
     return {
         "stages": stages, "lost": lost, "open_n": open_n,
         "pipeline": sum(s["value"] for s in stages), "weighted": sum(s["weighted"] for s in stages),
-        "clients": clients["c"], "won_value": clients["v"], "won_value_usd": clients["vu"],
         "pipeline_usd": sum(s["value_usd"] for s in stages), "weighted_usd": sum(s["weighted_usd"] for s in stages),
-        "win_rate": round(100 * clients["c"] / total) if total else None,
-        "cur_q": cur_q, "won_q": won_q, "overdue": overdue, "upcoming": upcoming,
-        "no_date": no_date, "max_count": max([s["count"] for s in stages] + [1]),
+        "overdue": overdue, "upcoming": upcoming, "max_count": max([s["count"] for s in stages] + [1]),
     }
 
 
-def breakdown(conn, field):
+BREAKDOWN_FIELDS = ("region", "presales_lead", "product", "offering_type", "owner", "source")
+
+
+def breakdown_rows(conn):
+    """Load once, then pass to breakdown() as many times as needed (one query instead of one per grouping)."""
+    return conn.execute("SELECT type, stage, value, value_usd, probability, " + ", ".join(BREAKDOWN_FIELDS)
+                        + " FROM records").fetchall()
+
+
+def breakdown(conn, field, rows=None):
     """Pipeline + client summary grouped by a free-text field, ignoring upper/lower-case differences."""
-    assert field in ("region", "presales_lead", "product", "offering_type", "owner", "source")
+    assert field in BREAKDOWN_FIELDS
     groups = {}
-    for r in conn.execute(f"SELECT {field} f, type, stage, value, value_usd, probability FROM records").fetchall():
-        label = (r["f"] or "").strip()
+    for r in (rows if rows is not None else breakdown_rows(conn)):
+        label = (r[field] or "").strip()
         grp = groups.setdefault(label.lower(), {
             "names": {}, "open_n": 0, "open_value": 0.0, "weighted": 0.0, "open_value_usd": 0.0,
             "weighted_usd": 0.0, "clients": 0, "won_value": 0.0, "won_value_usd": 0.0, "lost": 0})
@@ -1033,12 +1111,12 @@ def analytics_data(conn, cfg):
              "prospects": [sum(1 for r in prospects if key(r) == d.strftime("%Y-%m")) for d in ml],
              "clients": [sum(1 for r in clients if key(r) == d.strftime("%Y-%m")) for d in ml]}
 
-    br = [x for x in breakdown(conn, "region") if x["clients"] + x["lost"] > 0][:8]
+    br = [x for x in breakdown(conn, "region", rows) if x["clients"] + x["lost"] > 0][:8]
     winrate = {"labels": [x["name"] for x in br], "rate": [x["win_rate"] or 0 for x in br],
                "won": [x["clients"] for x in br], "lost": [x["lost"] for x in br]}
 
     region_s, source_s = group_series(opens, "region"), group_series(opens, "source")
-    by_product = breakdown(conn, "product")
+    by_product = breakdown(conn, "product", rows)
     pw = [x for x in by_product if x["clients"] + x["lost"] > 0 and not x["unset"]][:8]
     prodwin = {"labels": [x["name"] for x in pw], "rate": [x["win_rate"] or 0 for x in pw],
                "won": [x["clients"] for x in pw], "lost": [x["lost"] for x in pw]}
@@ -1105,7 +1183,7 @@ def analytics_data(conn, cfg):
         "avg_inr": pipe["inr"] / n_inr if n_inr else 0, "avg_usd": pipe["usd"] / n_usd if n_usd else 0,
         "won_q": sums(won_q), "cur_q": cur_q, "clients": sums(clients), "lost_n": len(lost), "win_rate": win_rate,
         "overdue_n": len(overdue), "stale_n": len(stale), "nodate_n": len(nodate),
-        "by_product": by_product, "by_offering": breakdown(conn, "offering_type"),
+        "by_product": by_product, "by_offering": breakdown(conn, "offering_type", rows),
         "charts": charts, "top_inr": top_inr, "top_usd": top_usd, "stale": stale_rows, "dq": dq, "highlights": hi,
     }
 
@@ -1127,6 +1205,7 @@ def product_choices(current=None):
 
 def report_data(conn, cfg):
     fy = int(cfg["fy_start_month"])
+    rows = breakdown_rows(conn)
     won = conn.execute(
         "SELECT COALESCE(closed_quarter,'(no quarter)') q, COUNT(*) c, COALESCE(SUM(value),0) v, "
         "COALESCE(SUM(value_usd),0) vu "
@@ -1156,8 +1235,8 @@ def report_data(conn, cfg):
     by_source = sorted(by_source, key=lambda r: (-(r["p"] + r["c"]), r["s"]))
     return {"won": won, "forecast": sorted(forecast.values(), key=lambda x: x["q"]),
             "by_owner": by_owner, "by_source": by_source,
-            "by_region": breakdown(conn, "region"), "by_presales": breakdown(conn, "presales_lead"),
-            "by_product": breakdown(conn, "product"), "by_offering": breakdown(conn, "offering_type")}
+            "by_region": breakdown(conn, "region", rows), "by_presales": breakdown(conn, "presales_lead", rows),
+            "by_product": breakdown(conn, "product", rows), "by_offering": breakdown(conn, "offering_type", rows)}
 
 
 # --------------------------------------------------------------------------- e-mail reminders
@@ -1450,8 +1529,8 @@ def before():
         if not sent or not secrets.compare_digest(sent, session.get("_csrf", "")):
             abort(400)
     ensure_init()
-    g.db = connect()
-    g.cfg = get_settings(g.db)
+    g.db = connect(reuse=True)
+    g.cfg = cached_settings(g.db)
     g.user = None
     uid = session.get("uid")
     if uid:

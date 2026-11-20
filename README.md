@@ -115,3 +115,9 @@ A read-only chat page ("Assistant" in the sidebar): ask things like *"which deal
 | `CHAT_PER_USER_HOUR` / `CHAT_PER_DAY` | optional limits (default 30 per user per hour, 300 per day in total) to stay inside free quotas |
 
 - Privacy: the question and the CRM rows needed to answer it are sent to the AI provider. Free plans of some providers may use that data to improve their models – check the provider's terms before using real customer data. The app stores only a usage count, never the questions.
+
+## Speed on Vercel
+
+- Put the **Vercel function region** and the **database region** in the same place (Vercel → Settings → Functions → Region; the database region is in the host name of `DATABASE_URL`, e.g. `…ap-southeast-1.aws.neon.tech`). Every page makes a few database round-trips, so distance matters most.
+- Use the database's **pooled** connection string. Free databases (e.g. Neon) go to sleep when idle; the first request after a pause is slow while it wakes up (the app retries automatically).
+- After changing the schema, bump `SCHEMA_VERSION` in `app.py` so existing databases are upgraded once; otherwise a cold start is a single query.

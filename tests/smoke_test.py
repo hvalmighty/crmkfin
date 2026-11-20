@@ -474,6 +474,30 @@ os.environ.pop("CHAT_PER_DAY")
 check("assistant JS is served", c.get("/chat.js").status_code == 200)
 os.environ.pop("LLM_API_KEY")
 
+# 19e. performance helpers
+_n = {"n": 0}; _o = crm.DB.execute
+def _cnt(self, sql, params=()):
+    _n["n"] += 1; return _o(self, sql, params)
+crm.DB.execute = _cnt
+crm._inited = False; crm.ensure_init()
+check("cold start on an up-to-date DB is a single query", _n["n"] == 1, _n["n"])
+_n["n"] = 0; c.get("/analytics"); check("analytics page: few queries", _n["n"] <= 3, _n["n"])
+_n["n"] = 0; c.get("/reports"); check("reports page: shared breakdown scan", _n["n"] <= 12, _n["n"])
+crm.DB.execute = _o
+_db = crm.connect(); _db.execute("DELETE FROM settings WHERE key='_schema'"); _db.commit()
+crm._inited = False; crm.ensure_init()
+check("missing schema marker triggers full (idempotent) init", crm.schema_is_current())
+check("internal settings keys hidden", "_schema" not in crm.get_settings(crm.connect()))
+t = token(path="/admin/settings"); c.post("/admin/settings", data={"_csrf": t, "company_name": "Cache Test Co", "reminder_emails": "", "reminder_day": "1", "reminder_hour": "8", "fy_start_month": "4"}, follow_redirects=True)
+check("settings change visible immediately (cache invalidated)", b"Cache Test Co" in c.get("/").data)
+t = token(path="/admin/settings"); c.post("/admin/settings", data={"_csrf": t, "company_name": "QUEST FT", "reminder_emails": "", "reminder_day": "1", "reminder_hour": "8", "fy_start_month": "4"}, follow_redirects=True)
+if crm.USE_PG:
+    d1 = crm.connect(reuse=True); d1.execute("SELECT 1"); id1 = id(d1.conn); d1.close()
+    d2 = crm.connect(reuse=True); d2.execute("SELECT 1"); same = id(d2.conn) == id1; d2.close()
+    check("PostgreSQL connection is reused between requests", same)
+    d3 = crm.connect(reuse=True); d3.conn.close(); d3.close()
+    d4 = crm.connect(reuse=True); check("dropped connection is replaced automatically", d4.execute("SELECT 1").fetchone() is not None); d4.close()
+
 # 20. admin delete-all (destructive - keep last)
 before = crm.connect().execute("SELECT COUNT(*) FROM records").fetchone()[0]
 check("have data to delete", before > 5, before)
