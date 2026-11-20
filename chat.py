@@ -81,7 +81,7 @@ TOOLS = [
         "parameters": {"type": "object", "properties": {}}}},
 ]
 
-SYSTEM = """You are the assistant inside QUEST FT, a small sales CRM (prospects, clients, sales funnel). Today is {today}.
+SYSTEM = """You are IRIS, the assistant inside QUEST FT, a small sales CRM (prospects, clients, sales funnel). Today is {today}.
 Rules:
 - Answer ONLY from the tools. Never invent records, numbers or dates. If the tools return nothing, say so.
 - You are read-only: you cannot add, change or delete anything. If asked to, explain where in the app to do it.

@@ -383,13 +383,15 @@ check("DQ table lists product", any(x["key"] == "product" for x in a["dq"]))
 # 19d. assistant (chat) - the AI provider is replaced by a scripted fake
 import chat as chatmod
 os.environ.pop("LLM_API_KEY", None)
-check("assistant page says not set up without key", b"Not set up yet" in c.get("/assistant").data)
-t = token(path="/assistant")
+check("IRIS button on every page, 'not set up' without key", b'id="iris-fab"' in c.get("/").data and b"IRIS isn&#39;t set up yet" in c.get("/").data or b"IRIS isn't set up yet" in c.get("/").data)
+check("old /assistant URL goes to the dashboard", c.get("/assistant").status_code == 302)
+t = token(path="/")
 r = c.post("/api/chat", data={"_csrf": t, "messages": _json.dumps([{"role": "user", "content": "hi"}])})
 check("chat API 503 without key", r.status_code == 503)
 os.environ["LLM_API_KEY"] = "test-key"
-check("assistant page shows chat when configured", b'id="chat-form"' in c.get("/assistant").data)
-check("sidebar links to assistant", b"/assistant" in c.get("/").data)
+_pg = c.get("/analytics").data
+check("IRIS chat box shown when configured, on any page", b'id="chat-form"' in _pg and b'id="iris-fab"' in _pg and b">IRIS<" in _pg)
+check("no IRIS widget on the login page", b"iris-fab" not in crm.app.test_client().get("/login").data)
 check("provider defaults", chatmod.config()[0].startswith("https://api.groq.com") and chatmod.config()[2])
 os.environ["LLM_PROVIDER"] = "gemini"; check("gemini provider preset", "generativelanguage" in chatmod.config()[0]); os.environ.pop("LLM_PROVIDER")
 
@@ -415,7 +417,7 @@ def fake(cfg, payload):
 chatmod._post = fake
 
 def ask(q, history=None):
-    t = token(path="/assistant")
+    t = token(path="/")
     msgs = (history or []) + [{"role": "user", "content": q}]
     return c.post("/api/chat", data={"_csrf": t, "messages": _json.dumps(msgs)})
 r = ask("which deals are overdue?")

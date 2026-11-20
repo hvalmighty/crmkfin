@@ -98,9 +98,9 @@ TEST_DATABASE_URL=postgresql://user@host/emptydb python tests/smoke_test.py   # 
 - In an Excel import, a product that is not in the master yet is added to it automatically (spelling is matched case-insensitively to the master). Columns: `Product`, `Product / Service` (placed after Region / Country in the template).
 - Analytics: pipeline by product, product vs service, closed-won by product, win rate by product, and a product scorecard; Reports has the same by product / product vs service.
 
-## Assistant (chat)
+## IRIS (chat assistant)
 
-A read-only chat page ("Assistant" in the sidebar): ask things like *"which deals are overdue?"*, *"compare products by pipeline and win rate"*, *"top 5 open deals by value"*.
+IRIS is a read-only assistant in the floating button at the bottom-right of every page: ask things like *"which deals are overdue?"*, *"compare products by pipeline and win rate"*, *"top 5 open deals by value"*.
 
 - It can **only look things up** through a few fixed read-only functions (pipeline summary, breakdowns, record search, record details, product list). It cannot add, change or delete data, and it never converts between INR and USD.
 - Uses any OpenAI-compatible AI service with a **free tier**. Default is Groq (model `openai/gpt-oss-120b`, with automatic fallback to other Groq models); Google Gemini and OpenRouter are built in.

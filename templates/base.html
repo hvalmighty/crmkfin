@@ -30,6 +30,7 @@
     <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></symbol>
     <symbol id="i-percent" viewBox="0 0 24 24"><line x1="19" y1="5" x2="5" y2="19"/><circle cx="6.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/></symbol>
     <symbol id="i-award" viewBox="0 0 24 24"><circle cx="12" cy="8" r="7"/><polyline points="8.21 13.89 7 23 12 20 17 23 15.79 13.88"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></symbol>
     <symbol id="i-chat" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></symbol>
     <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></symbol>
     <symbol id="i-pie" viewBox="0 0 24 24"><path d="M21.21 15.89A10 10 0 1 1 8 2.83"/><path d="M22 12A10 10 0 0 0 12 2v10z"/></symbol>
@@ -49,7 +50,6 @@
       <div class="nav-h">Overview</div>
       <a href="{{ url_for('dashboard') }}" class="{{ 'on' if ep == 'dashboard' }}"><svg class="i"><use href="#i-grid"/></svg>Dashboard</a>
       <a href="{{ url_for('analytics') }}" class="{{ 'on' if ep == 'analytics' }}"><svg class="i"><use href="#i-chart"/></svg>Analytics</a>
-      <a href="{{ url_for('assistant') }}" class="{{ 'on' if ep == 'assistant' }}"><svg class="i"><use href="#i-chat"/></svg>Assistant</a>
       <div class="nav-h">Pipeline</div>
       <a href="{{ url_for('records', type='prospect') }}" class="{{ 'on' if rec_ep and request.values.get('type') != 'client' }}"><svg class="i"><use href="#i-target"/></svg>Prospects</a>
       <a href="{{ url_for('records', type='client') }}" class="{{ 'on' if rec_ep and request.values.get('type') == 'client' }}"><svg class="i"><use href="#i-check"/></svg>Clients</a>
@@ -92,6 +92,41 @@
     </main>
   </div>
 </div>
+
+<div id="iris" data-csrf="{{ csrf_token() }}" data-url="{{ url_for('api_chat') }}" data-user="{{ g.user.username }}" data-ready="{{ '1' if chat_ready() else '0' }}">
+  <section id="iris-panel" class="iris-panel" role="dialog" aria-label="IRIS assistant" hidden>
+    <header class="iris-head">
+      <span class="iris-av"><svg class="i"><use href="#i-chat"/></svg></span>
+      <div class="grow"><b>IRIS</b><small>Your CRM assistant · read-only</small></div>
+      <button type="button" class="icon-btn" id="iris-new" title="New chat" aria-label="New chat"><svg class="i"><use href="#i-plus"/></svg></button>
+      <button type="button" class="icon-btn" id="iris-close" title="Close" aria-label="Close IRIS"><svg class="i"><use href="#i-x"/></svg></button>
+    </header>
+    {% if chat_ready() %}
+    <div class="chat-log" id="chat-log" aria-live="polite"></div>
+    <div class="chat-chips" id="chat-chips">
+      <button type="button">What does my pipeline look like?</button>
+      <button type="button">Which deals are overdue?</button>
+      <button type="button">What is closing in the next 30 days?</button>
+      <button type="button">Compare products by pipeline and win rate</button>
+      <button type="button">Top 5 open deals by value</button>
+    </div>
+    <form class="chat-form" id="chat-form" autocomplete="off">
+      <input type="text" id="chat-input" maxlength="1500" placeholder="Ask IRIS about your pipeline…" aria-label="Your question" required>
+      <button type="submit" id="chat-send">Send</button>
+    </form>
+    <p class="iris-note">IRIS uses an AI model and can be wrong – check key numbers in Reports. Questions are sent to the AI provider; this app doesn't store them.</p>
+    {% else %}
+    <div class="chat-log" style="height:auto"><div class="msg bot"><div class="bub">
+      <p><strong>IRIS isn't set up yet.</strong></p>
+      <p>{% if g.user.role == 'admin' %}To switch it on, add the <code>LLM_API_KEY</code> environment variable (free key – see the README, “Assistant”) and redeploy.{% else %}Ask your admin to switch it on.{% endif %}</p>
+    </div></div></div>
+    {% endif %}
+  </section>
+  <button type="button" id="iris-fab" class="iris-fab" aria-label="Open IRIS assistant" aria-expanded="false" title="Ask IRIS">
+    <svg class="i"><use href="#i-chat"/></svg><span>IRIS</span>
+  </button>
+</div>
+<script src="{{ url_for('static', filename='chat.js', v=ASSET_V) }}" defer></script>
 {% else %}
 <main class="wrap">
   {% with messages = get_flashed_messages(with_categories=true) %}

@@ -1492,7 +1492,7 @@ app.jinja_env.globals.update(csrf_token=csrf_token, STAGES=STAGES, OPEN_STAGES=O
                              ASSET_V=(os.environ.get("VERCEL_GIT_COMMIT_SHA") or "3")[:8],
                              distinct=lambda f: distinct_values(f),
                              product_choices=lambda cur=None: product_choices(cur),
-                             OFFERING_TYPES=OFFERING_TYPES)
+                             OFFERING_TYPES=OFFERING_TYPES, chat_ready=lambda: chat.config() is not None)
 
 
 @app.template_filter("fdate")
@@ -2016,7 +2016,7 @@ def chat_ctx():
 @app.route("/assistant")
 @login_required
 def assistant():
-    return render_template("assistant.html", ready=chat.config() is not None)
+    return redirect(url_for("dashboard"))      # IRIS now lives in the floating button on every page
 
 
 @app.route("/api/chat", methods=["POST"])
