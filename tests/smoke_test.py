@@ -454,6 +454,15 @@ chatmod._post = loop
 r = ask("summary"); check("endless tool loop is stopped", r.status_code == 502)
 chatmod._post = lambda cfg, payload: {"nonsense": 1}
 r = ask("summary"); check("garbled provider reply handled", r.status_code == 502)
+tried = []
+def nomodel(cfg, payload):
+    tried.append(payload["model"])
+    if len(tried) < 3:
+        e = chatmod.ChatError("no such model"); e.model_problem = True; raise e
+    return fake(cfg, payload)
+chatmod._post = nomodel
+r = ask("summary")
+check("falls back to the next model when one is unavailable", r.status_code == 200 and len(set(tried)) == 3 and tried[0] == chatmod.config()[2], tried)
 chatmod._post = fake
 n_chat = crm.connect().execute("SELECT COUNT(*) FROM audit_log WHERE action='chat'").fetchone()[0]
 check("chat usage counted (no question text stored)", n_chat >= 5 and not crm.connect().execute("SELECT 1 FROM audit_log WHERE action='chat' AND detail<>''").fetchone())

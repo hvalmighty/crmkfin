@@ -103,7 +103,7 @@ TEST_DATABASE_URL=postgresql://user@host/emptydb python tests/smoke_test.py   # 
 A read-only chat page ("Assistant" in the sidebar): ask things like *"which deals are overdue?"*, *"compare products by pipeline and win rate"*, *"top 5 open deals by value"*.
 
 - It can **only look things up** through a few fixed read-only functions (pipeline summary, breakdowns, record search, record details, product list). It cannot add, change or delete data, and it never converts between INR and USD.
-- Uses any OpenAI-compatible AI service with a **free tier**. Default is Groq; Google Gemini and OpenRouter are built in.
+- Uses any OpenAI-compatible AI service with a **free tier**. Default is Groq (model `openai/gpt-oss-120b`, with automatic fallback to other Groq models); Google Gemini and OpenRouter are built in.
 - Set these environment variables (Vercel → Settings → Environment Variables), then redeploy:
 
 | Variable | Meaning |

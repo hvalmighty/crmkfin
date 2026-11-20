@@ -12,10 +12,13 @@ import urllib.request
 
 # --- provider settings (all via environment variables) -----------------------------------------
 DEFAULTS = {
-    "groq":   ("https://api.groq.com/openai/v1", "llama-3.3-70b-versatile"),
+    "groq":   ("https://api.groq.com/openai/v1", "openai/gpt-oss-120b"),
     "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.5-flash"),
     "openrouter": ("https://openrouter.ai/api/v1", "meta-llama/llama-3.3-70b-instruct:free"),
 }
+# tried in order if the provider says the chosen model does not exist / is not allowed for this key
+FALLBACK_MODELS = {"groq": ["openai/gpt-oss-120b", "llama-3.3-70b-versatile", "openai/gpt-oss-20b", "llama-3.1-8b-instant"],
+                   "gemini": ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"]}
 MAX_TOOL_ROUNDS = 4
 MAX_HISTORY = 12            # messages kept from the browser
 MAX_MESSAGE_CHARS = 1500
@@ -178,7 +181,7 @@ def run_tool(name, args, ctx):
 
 # --- the model call ----------------------------------------------------------------------------
 class ChatError(Exception):
-    pass
+    model_problem = False
 
 
 def _post(cfg, payload):
@@ -195,6 +198,10 @@ def _post(cfg, payload):
             raise ChatError("The free AI service is busy or its daily limit is used up. Please try again in a minute.")
         if e.code in (401, 403):
             raise ChatError("The AI service rejected the API key. Ask the admin to check LLM_API_KEY.")
+        if e.code in (400, 404) and "model" in body.lower():
+            err = ChatError("The AI service does not offer the model '" + str(payload.get("model")) + "' to this key (admin: set LLM_MODEL). " + body[:120])
+            err.model_problem = True
+            raise err
         if e.code in (400, 404):
             raise ChatError("The AI service did not accept the request (model name may be retired – admin: check LLM_MODEL). " + body[:120])
         raise ChatError(f"The AI service returned an error ({e.code}).")
@@ -223,13 +230,22 @@ def answer(history, ctx, post=None):
     if cfg is None:
         raise ChatError("The assistant is not set up yet.")
     post = post or _post
+    prov = os.environ.get("LLM_PROVIDER", "groq").strip().lower()
+    models = [cfg[2]] + [m for m in FALLBACK_MODELS.get(prov, []) if m != cfg[2]] if not os.environ.get("LLM_BASE_URL") else [cfg[2]]
     msgs = [{"role": "system", "content": SYSTEM.format(today=ctx["today"].strftime("%A, %d %B %Y"))}] + history
     deadline = time.time() + 50
     for _ in range(MAX_TOOL_ROUNDS + 1):
         if time.time() > deadline:
             raise ChatError("That took too long. Try a narrower question.")
-        resp = post(cfg, {"model": cfg[2], "messages": msgs, "tools": TOOLS, "tool_choice": "auto",
-                          "temperature": 0.2, "max_tokens": 900})
+        while True:
+            try:
+                resp = post(cfg, {"model": models[0], "messages": msgs, "tools": TOOLS, "tool_choice": "auto",
+                                  "temperature": 0.2, "max_tokens": 900})
+                break
+            except ChatError as e:
+                if not e.model_problem or len(models) == 1:
+                    raise
+                models.pop(0)       # that model isn't available to this key: try the next one
         try:
             msg = resp["choices"][0]["message"]
         except (KeyError, IndexError, TypeError):
