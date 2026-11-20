@@ -500,6 +500,33 @@ if crm.USE_PG:
     d3 = crm.connect(reuse=True); d3.conn.close(); d3.close()
     d4 = crm.connect(reuse=True); check("dropped connection is replaced automatically", d4.execute("SELECT 1").fetchone() is not None); d4.close()
 
+# 19f. editing keeps the user on the list page they came from
+_db = crm.connect(); _db.executemany("INSERT INTO records(type,company,stage,probability,created_at,updated_at,expected_close) VALUES('prospect',?,'Lead',10,?,?,?)",
+    [(f"Pager Co {i:03d}", "2026-01-01T00:00:00", "2026-01-01T00:00:00", f"2030-01-{(i % 27) + 1:02d}") for i in range(crm.PAGE_SIZE * 2 + 3)]); _db.commit()
+lp = c.get("/records?type=prospect&page=2&q=Pager").get_data(as_text=True)
+check("edit links carry the list page", "next=/records?type%3Dprospect%26page%3D2%26q%3DPager" in lp, lp[lp.find("/edit?"):][:160])
+rid = crm.connect().execute("SELECT id FROM records WHERE company LIKE 'Pager Co%' ORDER BY expected_close, lower(company) LIMIT 1 OFFSET ?", (crm.PAGE_SIZE,)).fetchone()[0]
+back = "/records?type=prospect&page=2&q=Pager"
+form = c.get(f"/records/{rid}/edit?next=" + back.replace("?", "%3F").replace("&", "%26").replace("=", "%3D").replace("/", "%2F")).get_data(as_text=True)
+check("edit form keeps next + Cancel returns to page", 'name="next" value="/records?type=prospect&amp;page=2&amp;q=Pager"' in form and 'page=2&amp;q=Pager">Cancel' in form)
+t = token(path=f"/records/{rid}/edit")
+data = {"_csrf": t, "type": "prospect", "company": "Pager Co Edited", "stage": "Lead", "probability": "10", "expected_close": "2030-01-05", "next": back}
+r = c.post(f"/records/{rid}/edit", data=data)
+check("saving returns to the same page of the list", r.status_code == 302 and r.headers["Location"].endswith(back), r.headers.get("Location"))
+for bad in ["https://evil.example/x", "//evil.example/x", "/admin/users", "/records\\evil", "javascript:alert(1)"]:
+    r = c.post(f"/records/{rid}/edit", data=data | {"next": bad})
+    check(f"unsafe next ignored: {bad}", r.status_code == 302 and "evil" not in r.headers["Location"] and r.headers["Location"].endswith("/records?type=prospect"), r.headers.get("Location"))
+r = c.post(f"/records/{rid}/edit", data=data | {"type": "client", "closed_date": "2026-10-01", "next": back})
+check("converted record goes to the Clients list", r.status_code == 302 and "type=client" in r.headers["Location"], r.headers.get("Location"))
+bad = c.post(f"/records/{rid}/edit", data={"_csrf": t, "type": "prospect", "company": "", "next": back})
+check("validation error keeps next", b'name="next" value="/records?type=prospect&amp;page=2&amp;q=Pager"' in bad.data)
+rid2 = crm.connect().execute("SELECT id FROM records WHERE company LIKE 'Pager Co%' LIMIT 1").fetchone()[0]
+r = c.post(f"/records/{rid2}/delete", data={"_csrf": t, "next": back})
+check("delete returns to the same page", r.status_code == 302 and r.headers["Location"].endswith(back), r.headers.get("Location"))
+r = c.get("/records?type=prospect&page=999&q=Pager")
+check("page beyond the end shows the last page", r.status_code == 200 and b"Pager Co" in r.data)
+_db = crm.connect(); _db.execute("DELETE FROM records WHERE company LIKE 'Pager Co%'"); _db.commit()
+
 # 20. admin delete-all (destructive - keep last)
 before = crm.connect().execute("SELECT COUNT(*) FROM records").fetchone()[0]
 check("have data to delete", before > 5, before)

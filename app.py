@@ -1722,9 +1722,10 @@ def records():
     total = g.db.execute(f"SELECT COUNT(*) FROM records WHERE {w}", args).fetchone()[0]
     order = ("CASE WHEN expected_close IS NULL THEN 1 ELSE 0 END, expected_close, lower(company)"
              if kind == "prospect" else "closed_date DESC NULLS LAST, lower(company)")
+    pages = max((total + PAGE_SIZE - 1) // PAGE_SIZE, 1)
+    page = min(page, pages)           # e.g. the last row of the last page was just deleted
     rows = g.db.execute(f"SELECT * FROM records WHERE {w} ORDER BY {order} LIMIT ? OFFSET ?",
                         args + [PAGE_SIZE, (page - 1) * PAGE_SIZE]).fetchall()
-    pages = max((total + PAGE_SIZE - 1) // PAGE_SIZE, 1)
     return render_template("records.html", kind=kind, rows=rows, q=q, stage=stage, page=page,
                            pages=pages, total=total, today=datetime.now(TZ).date().isoformat(), missing=missing,
                            missing_label=dict((f[0], f[1]) for f in DQ_FIELDS).get(missing, ""))
@@ -1764,6 +1765,15 @@ def save_from_form(rid=None):
     return d, rid
 
 
+def list_next():
+    """Where to go back to after editing: the list page (with its filters and page number) the user came from.
+    Only paths inside /records are accepted, so this cannot be used as an open redirect."""
+    n = request.values.get("next", "")
+    if n.startswith("/records") and not n.startswith("//") and "\\" not in n and not any(ch in n for ch in "\r\n"):
+        return n
+    return ""
+
+
 @app.route("/records/new", methods=["GET", "POST"])
 @login_required
 def record_new():
@@ -1773,9 +1783,9 @@ def record_new():
         if d:
             flash(f"{d['company']} saved.", "ok")
             return redirect(url_for("records", type=d["type"]))
-        return render_template("record_form.html", rec=res, kind=res["type"], is_new=True)
+        return render_template("record_form.html", rec=res, kind=res["type"], is_new=True, next_url=list_next())
     return render_template("record_form.html", rec={"type": kind, "stage": "Lead", "probability": 10},
-                           kind=kind, is_new=True)
+                           kind=kind, is_new=True, next_url=list_next())
 
 
 @app.route("/records/<int:rid>/edit", methods=["GET", "POST"])
@@ -1788,14 +1798,16 @@ def record_edit(rid):
         d, res = save_from_form(rid)
         if d:
             flash(f"{d['company']} updated.", "ok")
-            return redirect(url_for("records", type=d["type"]))
-        return render_template("record_form.html", rec=res | {"id": rid}, kind=res["type"], is_new=False)
+            # stay on the same list page; if a prospect was converted it moves to the Clients list instead
+            return redirect((list_next() if d["type"] == rec["type"] else "") or url_for("records", type=d["type"]))
+        return render_template("record_form.html", rec=res | {"id": rid}, kind=res["type"], is_new=False,
+                               next_url=list_next())
     data = form_values(rec)
     kind = rec["type"]
     if request.args.get("convert") == "1" and kind == "prospect":
         kind = data["type"] = "client"
         data["closed_date"] = datetime.now(TZ).date().isoformat()
-    return render_template("record_form.html", rec=data, kind=kind, is_new=False,
+    return render_template("record_form.html", rec=data, kind=kind, is_new=False, next_url=list_next(),
                            converting=request.args.get("convert") == "1")
 
 
@@ -1809,7 +1821,7 @@ def record_delete(rid):
     audit(g.db, g.user["username"], "record_deleted", f"#{rid} {rec['company']}")
     g.db.commit()
     flash(f"{rec['company']} deleted.", "ok")
-    return redirect(url_for("records", type=rec["type"]))
+    return redirect(list_next() or url_for("records", type=rec["type"]))
 
 
 # ---- import / export

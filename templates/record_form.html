@@ -5,6 +5,7 @@
 <p class="sub">{% if converting %}Confirm the closure date and deal value, then save. The prospect becomes a client.{% else %}Fields marked * are required.{% endif %}</p>
 <form method="post" class="card">
   <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+  {% if next_url %}<input type="hidden" name="next" value="{{ next_url }}">{% endif %}
   <div class="form-grid">
     <div><label for="type">Type *</label>
       <select id="type" name="type">
@@ -67,7 +68,7 @@
   </div>
   <div class="bar" style="margin:18px 0 0">
     <button type="submit">Save</button>
-    <a class="btn alt" href="{{ url_for('records', type=kind) }}">Cancel</a>
+    <a class="btn alt" href="{{ next_url or url_for('records', type=kind) }}">Cancel</a>
   </div>
 </form>
 {% endblock %}

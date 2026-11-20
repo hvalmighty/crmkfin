@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}{{ 'Clients' if kind == 'client' else 'Prospects' }}{% endblock %}
 {% block content %}
+{% set back = request.full_path.rstrip('?') %}
 <div class="bar">
   <div class="grow"><h1>{{ 'Clients' if kind == 'client' else 'Prospects' }}</h1>
     <p class="sub" style="margin:0">{{ total }} record(s)</p></div>
@@ -47,7 +48,7 @@
   <tr><th>Company</th><th data-col="product">Product</th><th data-col="contact">Contact</th><th data-col="stage">Stage</th><th class="c" data-col="prob">Prob.</th><th data-col="close">Expected close</th><th class="r" data-col="inr">Value (INR)</th><th class="r" data-col="usd">Value (USD)</th><th data-col="owner">Owner</th><th data-col="presales">Presales lead</th><th data-col="region">Region</th><th data-col="source">Source</th><th></th></tr>
   {% for r in rows %}
   <tr class="{{ 'overdue' if r.expected_close and r.expected_close < today and r.stage != 'Lost' }}">
-    <td><a href="{{ url_for('record_edit', rid=r.id) }}"><strong>{{ r.company }}</strong></a></td>
+    <td><a href="{{ url_for('record_edit', rid=r.id, next=back) }}"><strong>{{ r.company }}</strong></a></td>
     <td data-col="product">{% if r.product %}{{ r.product }}{% if r.offering_type %}<br><span class="muted">{{ r.offering_type }}</span>{% endif %}{% elif r.offering_type %}<span class="muted">{{ r.offering_type }}</span>{% endif %}</td>
     <td data-col="contact">{{ r.contact_name or '' }}{% if r.email %}<br><span class="muted">{{ r.email }}</span>{% endif %}</td>
     <td data-col="stage"><span class="pill {{ r.stage }}">{{ r.stage }}</span></td>
@@ -56,11 +57,11 @@
     <td class="r" data-col="inr" style="white-space:nowrap">{{ r.value | money if r.value is not none else '–' }}</td><td class="r" data-col="usd" style="white-space:nowrap">{{ r.value_usd | usd if r.value_usd is not none else '–' }}</td>
     <td data-col="owner">{{ r.owner or '' }}</td><td data-col="presales">{{ r.presales_lead or '' }}</td><td data-col="region">{{ r.region or '' }}</td><td data-col="source">{{ r.source or '' }}</td>
     <td class="act"><div class="btns">
-      <a class="ib" href="{{ url_for('record_edit', rid=r.id) }}" title="Edit" aria-label="Edit {{ r.company }}"><svg class="i"><use href="#i-edit"/></svg></a>
-      <a class="ib" href="{{ url_for('record_edit', rid=r.id, convert=1) }}" title="Convert to client" aria-label="Convert {{ r.company }} to client"><svg class="i"><use href="#i-check"/></svg></a>
+      <a class="ib" href="{{ url_for('record_edit', rid=r.id, next=back) }}" title="Edit" aria-label="Edit {{ r.company }}"><svg class="i"><use href="#i-edit"/></svg></a>
+      <a class="ib" href="{{ url_for('record_edit', rid=r.id, convert=1, next=back) }}" title="Convert to client" aria-label="Convert {{ r.company }} to client"><svg class="i"><use href="#i-check"/></svg></a>
       {% if g.user.role == 'admin' %}
       <form class="inline" method="post" action="{{ url_for('record_delete', rid=r.id) }}" data-confirm="Delete {{ r.company }}? This cannot be undone.">
-        <input type="hidden" name="_csrf" value="{{ csrf_token() }}"><button class="ib danger" type="submit" title="Delete" aria-label="Delete {{ r.company }}"><svg class="i"><use href="#i-trash"/></svg></button></form>
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}"><input type="hidden" name="next" value="{{ back }}"><button class="ib danger" type="submit" title="Delete" aria-label="Delete {{ r.company }}"><svg class="i"><use href="#i-trash"/></svg></button></form>
       {% endif %}
     </div></td>
   </tr>
@@ -69,7 +70,7 @@
   <tr><th>Company</th><th data-col="product">Product</th><th data-col="contact">Contact</th><th data-col="closed">Closed date</th><th data-col="quarter">Quarter</th><th class="r" data-col="inr">Deal value (INR)</th><th class="r" data-col="usd">Deal value (USD)</th><th data-col="owner">Owner</th><th data-col="presales">Presales lead</th><th data-col="region">Region</th><th data-col="source">Source</th><th></th></tr>
   {% for r in rows %}
   <tr>
-    <td><a href="{{ url_for('record_edit', rid=r.id) }}"><strong>{{ r.company }}</strong></a></td>
+    <td><a href="{{ url_for('record_edit', rid=r.id, next=back) }}"><strong>{{ r.company }}</strong></a></td>
     <td data-col="product">{% if r.product %}{{ r.product }}{% if r.offering_type %}<br><span class="muted">{{ r.offering_type }}</span>{% endif %}{% elif r.offering_type %}<span class="muted">{{ r.offering_type }}</span>{% endif %}</td>
     <td data-col="contact">{{ r.contact_name or '' }}{% if r.email %}<br><span class="muted">{{ r.email }}</span>{% endif %}</td>
     <td data-col="closed" style="white-space:nowrap">{{ r.closed_date | fdate if r.closed_date else '–' }}</td>
@@ -77,10 +78,10 @@
     <td class="r" data-col="inr" style="white-space:nowrap">{{ r.value | money if r.value is not none else '–' }}</td><td class="r" data-col="usd" style="white-space:nowrap">{{ r.value_usd | usd if r.value_usd is not none else '–' }}</td>
     <td data-col="owner">{{ r.owner or '' }}</td><td data-col="presales">{{ r.presales_lead or '' }}</td><td data-col="region">{{ r.region or '' }}</td><td data-col="source">{{ r.source or '' }}</td>
     <td class="act"><div class="btns">
-      <a class="ib" href="{{ url_for('record_edit', rid=r.id) }}" title="Edit" aria-label="Edit {{ r.company }}"><svg class="i"><use href="#i-edit"/></svg></a>
+      <a class="ib" href="{{ url_for('record_edit', rid=r.id, next=back) }}" title="Edit" aria-label="Edit {{ r.company }}"><svg class="i"><use href="#i-edit"/></svg></a>
       {% if g.user.role == 'admin' %}
       <form class="inline" method="post" action="{{ url_for('record_delete', rid=r.id) }}" data-confirm="Delete {{ r.company }}? This cannot be undone.">
-        <input type="hidden" name="_csrf" value="{{ csrf_token() }}"><button class="ib danger" type="submit" title="Delete" aria-label="Delete {{ r.company }}"><svg class="i"><use href="#i-trash"/></svg></button></form>
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}"><input type="hidden" name="next" value="{{ back }}"><button class="ib danger" type="submit" title="Delete" aria-label="Delete {{ r.company }}"><svg class="i"><use href="#i-trash"/></svg></button></form>
       {% endif %}
     </div></td>
   </tr>
