@@ -98,6 +98,14 @@ TEST_DATABASE_URL=postgresql://user@host/emptydb python tests/smoke_test.py   # 
 - In an Excel import, a product that is not in the master yet is added to it automatically (spelling is matched case-insensitively to the master). Columns: `Product`, `Product / Service` (placed after Region / Country in the template).
 - Analytics: pipeline by product, product vs service, closed-won by product, win rate by product, and a product scorecard; Reports has the same by product / product vs service.
 
+## Sales targets vs achievement
+Admin → **Sales targets** is the master: one row per sales rep, with a target per quarter in INR and/or USD for a financial year.
+You can also *copy last year's targets* or upload an Excel (download the template; quarter `Q1`-`Q4`, or `Year` to spread evenly).
+- **Achieved** = clients closed in the period whose **Owner** matches the rep (case-insensitive).
+- **Pipeline** = open prospects expected to close in the period, weighted by probability; **Projected** = (achieved + weighted pipeline) / target.
+- Shown on **Analytics** (chart + table) and **Reports** (table + quarter-by-quarter matrix), with a year/quarter selector. IRIS can answer target questions too.
+- Targets are stored against the year the FY *starts* in, so changing the FY start month in Settings reinterprets them.
+
 ## IRIS (chat assistant)
 
 IRIS is a read-only assistant in the floating button at the bottom-right of every page: ask things like *"which deals are overdue?"*, *"compare products by pipeline and win rate"*, *"top 5 open deals by value"*.

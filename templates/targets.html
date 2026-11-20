@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Sales targets{% endblock %}
+{% block content %}
+<div class="bar"><div class="grow"><h1>Sales targets</h1>
+  <p class="sub" style="margin:0">Set each sales rep's target per quarter, in INR and USD (kept separate). Achievements come from clients closed in the period; compare them under Analytics and Reports.</p></div>
+  <a class="btn alt" href="{{ url_for('analytics', tfy=fy) }}#targets">View comparison →</a></div>
+
+<div class="card">
+  <form method="get" class="bar" style="margin:0">
+    <label for="fy" style="margin:0">Financial year</label>
+    <select id="fy" name="fy" onchange="this.form.submit()">{% for y in years %}<option value="{{ y.y }}" {{ 'selected' if y.y == fy }}>{{ y.name }}</option>{% endfor %}</select>
+    <span class="muted">{{ qlabels | join(' · ') }}</span>
+  </form>
+</div>
+
+<form method="post" class="card flush" id="tgt-form">
+  <input type="hidden" name="_csrf" value="{{ csrf_token() }}"><input type="hidden" name="fy" value="{{ fy }}">
+  <div class="scroll"><table class="rec tgt-grid">
+    <tr><th>Sales rep</th>{% for l in qlabels %}<th class="c">Q{{ loop.index }}<br><span class="muted">{{ l }}</span></th>{% endfor %}<th class="r">Year total</th></tr>
+    {% for r in rows + [{'name': '', 'q': {}}] * 3 %}
+    {% set i = loop.index0 %}
+    <tr>
+      <td>{% if r.name %}<input type="text" name="rep" value="{{ r.name }}" maxlength="80" readonly class="plain" aria-label="Sales rep">{% else %}<input type="text" name="rep" value="" maxlength="80" placeholder="+ New sales rep" aria-label="New sales rep">{% endif %}</td>
+      {% for q in range(1, 5) %}{% set v = r.q.get(q, (none, none)) %}
+      <td class="c"><div class="pair"><span class="cur">₹</span><input type="text" inputmode="decimal" name="t{{ i }}_{{ q }}_inr" value="{{ '%g' % v[0] if v[0] is not none else '' }}" data-sum="inr" aria-label="{{ r.name or 'New' }} Q{{ q }} INR target">
+        </div><div class="pair"><span class="cur">$</span><input type="text" inputmode="decimal" name="t{{ i }}_{{ q }}_usd" value="{{ '%g' % v[1] if v[1] is not none else '' }}" data-sum="usd" aria-label="{{ r.name or 'New' }} Q{{ q }} USD target"></div></td>
+      {% endfor %}
+      <td class="r"><div class="tot"><span data-tot="inr">–</span></div><div class="tot"><span data-tot="usd">–</span></div></td>
+    </tr>
+    {% endfor %}
+  </table></div>
+  <div class="bar" style="margin:0;padding:16px 22px">
+    <button type="submit">Save targets</button>
+    <span class="muted">Leave both boxes empty to remove a target. Reps are listed from the “Owner” on your prospects and clients – spelling must match (upper/lower case doesn’t matter).</span>
+  </div>
+</form>
+
+<div class="grid two">
+  <div class="card">
+    <h2>Copy from last year</h2>
+    <p class="muted">Fills empty cells of {{ fy_label }} with the {{ fy_name(fy - 1) }} targets. Existing numbers are kept.</p>
+    <form method="post"><input type="hidden" name="_csrf" value="{{ csrf_token() }}"><input type="hidden" name="fy" value="{{ fy }}"><input type="hidden" name="copy_prev" value="1">
+      <button class="alt" type="submit">Copy {{ fy_name(fy - 1) }} → {{ fy_label }}</button></form>
+  </div>
+  <div class="card">
+    <h2>Upload targets from Excel</h2>
+    <p class="muted">One row per rep and quarter (or “Year” to spread evenly). <a href="{{ url_for('targets_template') }}">Download the template</a>.</p>
+    <form method="post" action="{{ url_for('targets_import') }}" enctype="multipart/form-data" class="bar" style="margin:0">
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <input type="file" name="file" accept=".xlsx" required><button type="submit">Upload</button>
+    </form>
+  </div>
+</div>
+{% endblock %}

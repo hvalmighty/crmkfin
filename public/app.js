@@ -102,3 +102,21 @@ document.addEventListener("submit", function (e) {
     });
   }
 })();
+
+
+// Sales targets grid: live yearly totals per row.
+(function () {
+  var f = document.getElementById("tgt-form");
+  if (!f) return;
+  function fmt(c, n) { return n ? (c === "inr" ? "₹" : "$") + Math.round(n).toLocaleString(c === "inr" ? "en-IN" : "en-US") : "–"; }
+  function recalc() {
+    f.querySelectorAll("tr").forEach(function (tr) {
+      ["inr", "usd"].forEach(function (c) {
+        var sum = 0, any = false;
+        tr.querySelectorAll('input[data-sum="' + c + '"]').forEach(function (i) { var v = parseFloat(String(i.value).replace(/[^\d.]/g, "")); if (!isNaN(v)) { sum += v; any = true; } });
+        var out = tr.querySelector('[data-tot="' + c + '"]'); if (out) out.textContent = any ? fmt(c, sum) : "–";
+      });
+    });
+  }
+  f.addEventListener("input", recalc); recalc();
+})();

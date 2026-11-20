@@ -128,6 +128,14 @@ def schema_statements():
             name {uname},
             active INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL)""",
+        f"""CREATE TABLE IF NOT EXISTS targets (
+            id {pk},
+            rep TEXT NOT NULL,
+            fy INTEGER NOT NULL,
+            quarter INTEGER NOT NULL,
+            value_inr {real}, value_usd {real},
+            updated_at TEXT NOT NULL)""",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_targets_key ON targets (lower(rep), fy, quarter)",
         f"""CREATE TABLE IF NOT EXISTS audit_log (
             id {pk},
             ts TEXT NOT NULL, username TEXT, action TEXT NOT NULL, detail TEXT)""",
@@ -343,7 +351,7 @@ def migrate(conn):
 
 
 # Bump this whenever the schema / migrations / seed data change, so existing databases get upgraded once.
-SCHEMA_VERSION = "2026-11-20.1"
+SCHEMA_VERSION = "2026-11-20.2"
 
 
 def schema_is_current():
@@ -1680,13 +1688,15 @@ def dashboard():
 @app.route("/analytics")
 @login_required
 def analytics():
-    return render_template("analytics.html", a=analytics_data(g.db, g.cfg))
+    a, tv = analytics_data(g.db, g.cfg), target_view()
+    a["charts"]["targets"] = tv["chart"]
+    return render_template("analytics.html", a=a, tv=tv)
 
 
 @app.route("/reports")
 @login_required
 def reports():
-    return render_template("reports.html", d=dashboard_data(g.db, g.cfg), r=report_data(g.db, g.cfg))
+    return render_template("reports.html", d=dashboard_data(g.db, g.cfg), r=report_data(g.db, g.cfg), tv=target_view())
 
 
 # ---- records
@@ -2022,7 +2032,8 @@ def chat_ctx():
     cfg = g.cfg
     return {"conn": g.db, "today": datetime.now(TZ).date(),
             "analytics": lambda: analytics_data(g.db, cfg), "funnel": lambda: funnel(g.db),
-            "breakdown": lambda f: breakdown(g.db, f), "products": lambda: active_products(g.db)}
+            "breakdown": lambda f: breakdown(g.db, f), "products": lambda: active_products(g.db),
+            "targets": lambda fy, q: target_data(g.db, cfg, int(fy) if fy else current_fy(cfg), int(q or 0))}
 
 
 @app.route("/assistant")
@@ -2058,6 +2069,263 @@ def api_chat():
         return {"reply": chat.answer(history, chat_ctx())}
     except chat.ChatError as e:
         return {"error": str(e)}, 502
+
+
+# ---- sales targets (target vs achievement per sales rep)
+def fy_of(d, fy_start):
+    """(financial-year start year, quarter 1-4) that a date falls in."""
+    return (d.year if d.month >= fy_start else d.year - 1), ((d.month - fy_start) % 12) // 3 + 1
+
+
+def fy_name(y, fy_start):
+    return str(y) if fy_start == 1 else f"FY{y}-{str(y + 1)[-2:]}"
+
+
+def quarter_labels(y, fy_start):
+    out = []
+    for q in range(4):
+        m = fy_start + 3 * q
+        out.append(quarter_label(date(y + (m - 1) // 12, (m - 1) % 12 + 1, 1), fy_start))
+    return out
+
+
+def current_fy(cfg):
+    return fy_of(datetime.now(TZ).date(), int(cfg["fy_start_month"]))[0]
+
+
+def fy_options(conn, cfg):
+    cur = current_fy(cfg)
+    ys = {cur - 1, cur, cur + 1} | {r["fy"] for r in conn.execute("SELECT DISTINCT fy FROM targets")}
+    return [{"y": y, "name": fy_name(y, int(cfg["fy_start_month"]))} for y in sorted(ys)]
+
+
+def pct_of(a, t):
+    return round(100 * a / t) if t else None
+
+
+def target_data(conn, cfg, fy, quarter=0):
+    """Target vs achieved per sales rep (owner) for one financial year and either one quarter or the whole year.
+    Achieved = value of clients closed in the period; pipeline = probability-weighted open prospects expected
+    to close in the period. INR and USD are never mixed."""
+    fy_start = int(cfg["fy_start_month"])
+    labels = quarter_labels(fy, fy_start)
+    quarter = quarter if quarter in (1, 2, 3, 4) else 0
+    reps = {}
+
+    def slot(name):
+        k = (name or "").strip().lower()
+        if k not in reps:
+            reps[k] = {"name": (name or "").strip() or "(unassigned)", "has_target": False,
+                       "q": {i: dict(t_inr=0.0, t_usd=0.0, a_inr=0.0, a_usd=0.0, a_n=0, w_inr=0.0, w_usd=0.0) for i in range(1, 5)}}
+        return reps[k]
+
+    for r in conn.execute("SELECT rep, quarter, value_inr, value_usd FROM targets WHERE fy=?", (fy,)):
+        x = slot(r["rep"]); x["name"] = r["rep"]; x["has_target"] = True
+        x["q"][r["quarter"]]["t_inr"] = r["value_inr"] or 0.0
+        x["q"][r["quarter"]]["t_usd"] = r["value_usd"] or 0.0
+    for r in conn.execute("SELECT owner, value, value_usd, closed_date, closed_quarter FROM records WHERE type='client'"):
+        if r["closed_date"]:
+            y, q = fy_of(date.fromisoformat(r["closed_date"]), fy_start)
+            if y != fy:
+                continue
+        elif r["closed_quarter"] in labels:
+            q = labels.index(r["closed_quarter"]) + 1
+        else:
+            continue
+        b = slot(r["owner"])["q"][q]
+        b["a_inr"] += r["value"] or 0; b["a_usd"] += r["value_usd"] or 0; b["a_n"] += 1
+    for r in conn.execute("SELECT owner, value, value_usd, probability, expected_close FROM records "
+                          "WHERE type='prospect' AND stage!='Lost' AND expected_close IS NOT NULL"):
+        y, q = fy_of(date.fromisoformat(r["expected_close"]), fy_start)
+        if y == fy:
+            b = slot(r["owner"])["q"][q]
+            b["w_inr"] += (r["value"] or 0) * (r["probability"] or 0) / 100
+            b["w_usd"] += (r["value_usd"] or 0) * (r["probability"] or 0) / 100
+
+    qs = [quarter] if quarter else [1, 2, 3, 4]
+    rows = []
+    for x in reps.values():
+        agg = {k: sum(x["q"][i][k] for i in qs) for k in x["q"][1]}
+        row = {"name": x["name"], "has_target": x["has_target"], **agg,
+               "pct_inr": pct_of(agg["a_inr"], agg["t_inr"]), "pct_usd": pct_of(agg["a_usd"], agg["t_usd"]),
+               "gap_inr": max(agg["t_inr"] - agg["a_inr"], 0), "gap_usd": max(agg["t_usd"] - agg["a_usd"], 0),
+               "proj_inr": pct_of(agg["a_inr"] + agg["w_inr"], agg["t_inr"]),
+               "proj_usd": pct_of(agg["a_usd"] + agg["w_usd"], agg["t_usd"]),
+               "quarters": [{**x["q"][i], "pct_inr": pct_of(x["q"][i]["a_inr"], x["q"][i]["t_inr"]),
+                             "pct_usd": pct_of(x["q"][i]["a_usd"], x["q"][i]["t_usd"])} for i in range(1, 5)]}
+        if any(agg[k] for k in ("t_inr", "t_usd", "a_inr", "a_usd", "w_inr", "w_usd")) or x["has_target"]:
+            rows.append(row)
+    rows.sort(key=lambda r: (r["name"] == "(unassigned)", -(r["t_inr"] + r["t_usd"]), -(r["a_inr"] + r["a_usd"]), r["name"].lower()))
+    tot = {k: sum(r[k] for r in rows) for k in ("t_inr", "t_usd", "a_inr", "a_usd", "a_n", "w_inr", "w_usd", "gap_inr", "gap_usd")}
+    tot.update(pct_inr=pct_of(tot["a_inr"], tot["t_inr"]), pct_usd=pct_of(tot["a_usd"], tot["t_usd"]),
+               proj_inr=pct_of(tot["a_inr"] + tot["w_inr"], tot["t_inr"]), proj_usd=pct_of(tot["a_usd"] + tot["w_usd"], tot["t_usd"]),
+               quarters=[{k: sum(r["quarters"][i][k] for r in rows) for k in ("t_inr", "t_usd", "a_inr", "a_usd")} for i in range(4)])
+    for qd in tot["quarters"]:
+        qd["pct_inr"], qd["pct_usd"] = pct_of(qd["a_inr"], qd["t_inr"]), pct_of(qd["a_usd"], qd["t_usd"])
+    shown = rows[:15]
+    chart = {"labels": [r["name"] for r in shown]}
+    for k in ("t_inr", "a_inr", "w_inr", "t_usd", "a_usd", "w_usd"):
+        chart[k] = [round(r[k], 2) for r in shown]
+    return {"fy": fy, "fy_name": fy_name(fy, fy_start), "quarter": quarter, "q_labels": labels,
+            "period": f"Q{quarter}" if quarter else "Full year", "rows": rows, "total": tot,
+            "any_target": any(r["t_inr"] or r["t_usd"] for r in rows), "chart": chart, "years": fy_options(conn, cfg)}
+
+
+def target_view():
+    """Reads ?tfy=&tq= from the URL (used by Analytics and Reports)."""
+    fy = request.args.get("tfy", type=int) or current_fy(g.cfg)
+    q = request.args.get("tq", 0, type=int)
+    return target_data(g.db, g.cfg, fy, q)
+
+
+def upsert_targets(conn, items, now):
+    """items: iterable of (rep, fy, quarter, inr, usd); a pair of None values removes that target."""
+    existing = {}
+    for r in conn.execute("SELECT id, lower(rep) k, fy, quarter FROM targets"):
+        existing[(r["k"], r["fy"], r["quarter"])] = r["id"]
+    n = 0
+    for rep_name, fy, q, inr, usd in items:
+        key = (rep_name.lower(), fy, q)
+        if inr is None and usd is None:
+            if key in existing:
+                conn.execute("DELETE FROM targets WHERE id=?", (existing.pop(key),))
+                n += 1
+        elif key in existing:
+            conn.execute("UPDATE targets SET rep=?, value_inr=?, value_usd=?, updated_at=? WHERE id=?",
+                         (rep_name, inr, usd, now, existing[key]))
+            n += 1
+        else:
+            conn.execute("INSERT INTO targets(rep,fy,quarter,value_inr,value_usd,updated_at) VALUES(?,?,?,?,?,?)",
+                         (rep_name, fy, q, inr, usd, now))
+            n += 1
+    return n
+
+
+def target_grid(fy):
+    """Rows for the target master: every rep that has a target this year or appears as an owner on a record."""
+    rows = {}
+    for r in g.db.execute("SELECT rep, quarter, value_inr, value_usd FROM targets WHERE fy=?", (fy,)):
+        x = rows.setdefault(r["rep"].lower(), {"name": r["rep"], "q": {}})
+        x["name"] = r["rep"]; x["q"][r["quarter"]] = (r["value_inr"], r["value_usd"])
+    for r in g.db.execute("SELECT MIN(owner) o, lower(owner) k FROM records WHERE owner IS NOT NULL AND owner<>'' GROUP BY lower(owner)"):
+        rows.setdefault(r["k"], {"name": r["o"], "q": {}})
+    return sorted(rows.values(), key=lambda x: x["name"].lower())
+
+
+@app.route("/admin/targets", methods=["GET", "POST"])
+@admin_required
+def targets_admin():
+    fy_start = int(g.cfg["fy_start_month"])
+    fy = request.values.get("fy", type=int) or current_fy(g.cfg)
+    if request.method == "POST":
+        if request.form.get("copy_prev"):
+            prev = g.db.execute("SELECT rep, quarter, value_inr, value_usd FROM targets WHERE fy=?", (fy - 1,)).fetchall()
+            have = {(r["rep"].lower(), r["quarter"]) for r in g.db.execute("SELECT rep, quarter FROM targets WHERE fy=?", (fy,))}
+            n = upsert_targets(g.db, [(r["rep"], fy, r["quarter"], r["value_inr"], r["value_usd"]) for r in prev
+                                      if (r["rep"].lower(), r["quarter"]) not in have], iso(utcnow()))
+            audit(g.db, g.user["username"], "targets_copied", f"{fy - 1} -> {fy}: {n} cell(s)")
+            g.db.commit()
+            flash(f"Copied {n} target(s) from {fy_name(fy - 1, fy_start)} into empty cells.", "ok")
+            return redirect(url_for("targets_admin", fy=fy))
+        items, errors, seen = [], [], set()
+        for i, name in enumerate(request.form.getlist("rep")):
+            name = clean_text(name, 80) or ""
+            vals = []
+            for q in range(1, 5):
+                try:
+                    vals.append((q, parse_money(request.form.get(f"t{i}_{q}_inr")), parse_money(request.form.get(f"t{i}_{q}_usd"))))
+                except ValueError as e:
+                    errors.append(f"{name or 'New row'} Q{q}: {e}")
+            if not name:
+                if any(v[1] is not None or v[2] is not None for v in vals):
+                    errors.append("A row has targets but no sales rep name.")
+                continue
+            if name.lower() in seen:
+                errors.append(f"'{name}' appears twice.")
+                continue
+            seen.add(name.lower())
+            items += [(name, fy, q, a, b) for q, a, b in vals]
+        if errors:
+            for e in errors[:6]:
+                flash(e, "error")
+        else:
+            n = upsert_targets(g.db, items, iso(utcnow()))
+            audit(g.db, g.user["username"], "targets_saved", f"{fy_name(fy, fy_start)}: {n} change(s)")
+            g.db.commit()
+            flash(f"Targets for {fy_name(fy, fy_start)} saved.", "ok")
+            return redirect(url_for("targets_admin", fy=fy))
+    return render_template("targets.html", fy=fy, fy_label=fy_name(fy, fy_start), rows=target_grid(fy), years=fy_options(g.db, g.cfg),
+                           qlabels=quarter_labels(fy, fy_start), fy_start=fy_start, fy_name=lambda y: fy_name(y, fy_start))
+
+
+TARGET_HEADERS = ["Sales Rep*", "Financial Year*", "Quarter (Q1-Q4 or Year)*", "Target (INR)", "Target (USD)"]
+
+
+@app.route("/admin/targets/template.xlsx")
+@admin_required
+def targets_template():
+    wb = Workbook(); ws = wb.active; ws.title = "Targets"
+    ws.append(TARGET_HEADERS)
+    fy = current_fy(g.cfg)
+    ws.append(["Example Rep", fy, "Q1", 2500000, 30000])
+    ws.append(["Example Rep", fy, "Year", 10000000, 120000])
+    style_header(ws, [26, 18, 26, 16, 16])
+    ws2 = wb.create_sheet("Read me")
+    for line in ("One row per sales rep and quarter. Quarter = Q1, Q2, Q3 or Q4 (of the financial year), or 'Year' to spread a yearly target evenly over the four quarters.",
+                 "Financial Year = the year it starts in, e.g. 2026 (for an April-March year, 2026 means FY2026-27). Calendar-year companies just use the year.",
+                 "Re-uploading overwrites the same rep + year + quarter. Leave both target cells empty to remove a target. INR and USD are separate."):
+        ws2.append([line])
+    ws2.column_dimensions["A"].width = 140
+    bio = io.BytesIO(); wb.save(bio); bio.seek(0)
+    return send_file(bio, as_attachment=True, download_name="targets_template.xlsx",
+                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+@app.route("/admin/targets/import", methods=["POST"])
+@admin_required
+def targets_import():
+    f = request.files.get("file")
+    if not f or not f.filename.lower().endswith(".xlsx"):
+        flash("Choose an Excel (.xlsx) file.", "error")
+        return redirect(url_for("targets_admin"))
+    errors, items = [], []
+    try:
+        wb = load_workbook(f.stream, read_only=True, data_only=True)
+        ws = wb["Targets"] if "Targets" in wb.sheetnames else wb.worksheets[0]
+        for n, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+            if n > 2001:
+                errors.append("Only the first 2,000 rows are read."); break
+            row = list(row) + [None] * 5
+            if all(v in (None, "") for v in row[:5]):
+                continue
+            name, fyv, qv, inr_v, usd_v = row[:5]
+            name = clean_text(str(name) if name is not None else "", 80)
+            m = re.search(r"(\d{4})", str(fyv or ""))
+            try:
+                if not name: raise ValueError("sales rep is missing")
+                if not m: raise ValueError("financial year is missing (e.g. 2026)")
+                inr, usd = parse_money(inr_v), parse_money(usd_v)
+            except ValueError as e:
+                errors.append(f"Row {n}: {e}"); continue
+            qs = str(qv or "").strip().lower().replace("q", "")
+            fy = int(m.group(1))
+            if qs in ("1", "2", "3", "4"):
+                items.append((name, fy, int(qs), inr, usd))
+            elif qs in ("", "year", "fy", "annual", "full year", "yearly"):
+                for q in range(1, 5):
+                    items.append((name, fy, q, None if inr is None else round(inr / 4, 2), None if usd is None else round(usd / 4, 2)))
+            else:
+                errors.append(f"Row {n}: quarter must be Q1-Q4 or Year (got '{qv}')")
+    except Exception as exc:
+        g.db.rollback(); log.warning("targets import failed: %s", exc)
+        flash("Could not read that file - is it a valid .xlsx workbook?", "error")
+        return redirect(url_for("targets_admin"))
+    n = upsert_targets(g.db, items, iso(utcnow()))
+    audit(g.db, g.user["username"], "targets_import", f"{f.filename[:60]}: {n} change(s), {len(errors)} problem(s)")
+    g.db.commit()
+    flash(f"Imported targets: {n} saved." + (f" {len(errors)} row(s) skipped: " + "; ".join(errors[:4]) if errors else ""), "error" if errors else "ok")
+    fy = items[0][1] if items else None
+    return redirect(url_for("targets_admin", fy=fy) if fy else url_for("targets_admin"))
 
 
 # ---- admin: product master

@@ -424,7 +424,7 @@ r = ask("which deals are overdue?")
 check("chat returns model answer", r.status_code == 200 and r.get_json()["reply"] == "FAKE-ANSWER", r.get_data(as_text=True)[:200])
 check("overdue tool returned the overdue prospect", "Past Due Co" in seen["tool_result"] and "Prod Co" not in seen["tool_result"], seen["tool_result"][:300])
 check("system prompt has date + rules", "read-only" in seen["system"] and "NEVER convert" in seen["system"])
-check("model is only offered read-only tools", {x["function"]["name"] for x in seen["tools"]} == {"pipeline_summary", "breakdown", "search_records", "get_record", "list_products"})
+check("model is only offered read-only tools", {x["function"]["name"] for x in seen["tools"]} == {"pipeline_summary", "breakdown", "search_records", "get_record", "list_products", "target_vs_achievement"})
 r = ask("product comparison")
 tr = _json.loads(seen["tool_result"])
 check("breakdown tool has product rows", any(x["name"] == "mPower Wealth" and x["open_value"] == 1000000 for x in tr["rows"]), seen["tool_result"][:300])
@@ -483,7 +483,7 @@ def _cnt(self, sql, params=()):
 crm.DB.execute = _cnt
 crm._inited = False; crm.ensure_init()
 check("cold start on an up-to-date DB is a single query", _n["n"] == 1, _n["n"])
-_n["n"] = 0; c.get("/analytics"); check("analytics page: few queries", _n["n"] <= 3, _n["n"])
+_n["n"] = 0; c.get("/analytics"); check("analytics page: few queries", _n["n"] <= 6, _n["n"])
 _n["n"] = 0; c.get("/reports"); check("reports page: shared breakdown scan", _n["n"] <= 12, _n["n"])
 crm.DB.execute = _o
 _db = crm.connect(); _db.execute("DELETE FROM settings WHERE key='_schema'"); _db.commit()
@@ -559,6 +559,74 @@ check("users + settings survive delete", crm.connect().execute("SELECT COUNT(*) 
 check("deletes are audit-logged", crm.connect().execute("SELECT COUNT(*) FROM audit_log WHERE action IN ('delete_data','delete_data_denied')").fetchone()[0] >= 4)
 for pth in ["/", "/analytics", "/reports", "/records?type=prospect", "/records?type=client", "/admin/delete-data"]:
     check(f"pages render with empty database {pth}", c.get(pth).status_code == 200)
+
+# 20. sales targets vs achievement (FY starts April in this test: FY2026 = Apr 2026 - Mar 2027)
+check("targets admin page", c.get("/admin/targets?fy=2026").status_code == 200)
+t = token(path="/admin/targets?fy=2026")
+form = {"_csrf": t, "fy": "2026", "rep": ["Ravi", "Meena", ""],
+        "t0_1_inr": "10,00,000", "t0_2_inr": "1000000", "t0_3_inr": "", "t0_4_inr": "", "t0_1_usd": "5000",
+        "t1_1_inr": "500000"}
+r = c.post("/admin/targets?fy=2026", data=form, follow_redirects=True); check("targets saved", b"saved" in r.data, r.data[:200])
+n = crm.connect().execute("SELECT COUNT(*) FROM targets WHERE fy=2026").fetchone()[0]
+check("targets stored (empty cells are not rows)", n == 3, n)
+bad = dict(form, t0_1_inr="abc"); r = c.post("/admin/targets?fy=2026", data=bad, follow_redirects=True)
+check("bad target amount rejected", b"Ravi Q1" in r.data)
+dup = dict(form, rep=["Ravi", "ravi", ""]); r = c.post("/admin/targets?fy=2026", data=dup, follow_redirects=True)
+check("duplicate rep rejected", b"appears twice" in r.data)
+r = c.post("/admin/targets?fy=2026", data=dict(form, rep=["", "", ""], t2_1_inr="5"), follow_redirects=True)
+check("targets without a name rejected", b"no sales rep name" in r.data)
+
+t = token(path="/records/new")
+def rec(**kw):
+    c.post("/records/new", data=dict({"_csrf": t}, **kw))
+rec(type="client", company="C1", owner="ravi", closed_date="2026-05-10", value="400000", value_usd="1000")   # Q1 FY26
+rec(type="client", company="C2", owner="Ravi", closed_date="2026-08-01", value="100000")                    # Q2
+rec(type="client", company="C3", owner="Ravi", closed_date="2025-05-10", value="999999")                    # other FY
+rec(type="client", company="C4", owner="Meena", closed_quarter="2026-Q2", value="50000") if False else None
+rec(type="prospect", company="P1", owner="RAVI", stage="Proposal", probability="50", expected_close="2026-06-15", value="200000")
+rec(type="prospect", company="P2", owner="Ravi", stage="Lost", probability="90", expected_close="2026-06-15", value="900000")
+d = crm.target_data(crm.connect(), crm.get_settings(crm.connect()), 2026, 0)
+rv = {x["name"]: x for x in d["rows"]}
+check("rep matched case-insensitively", "Ravi" in rv and "ravi" not in rv and "RAVI" not in rv, list(rv))
+check("target total", rv["Ravi"]["t_inr"] == 2000000, rv["Ravi"]["t_inr"])
+check("achieved only inside the FY", rv["Ravi"]["a_inr"] == 500000 and rv["Ravi"]["a_n"] == 2, rv["Ravi"]["a_inr"])
+check("attainment %", rv["Ravi"]["pct_inr"] == 25, rv["Ravi"]["pct_inr"])
+check("weighted pipeline ignores Lost", rv["Ravi"]["w_inr"] == 100000, rv["Ravi"]["w_inr"])
+check("projected %", rv["Ravi"]["proj_inr"] == 30, rv["Ravi"]["proj_inr"])
+check("usd tracked separately", rv["Ravi"]["a_usd"] == 1000 and rv["Ravi"]["t_usd"] == 5000 and rv["Ravi"]["pct_usd"] == 20)
+check("rep with target but no sales listed", rv["Meena"]["t_inr"] == 500000 and rv["Meena"]["a_inr"] == 0 and rv["Meena"]["pct_inr"] == 0)
+q1 = {x["name"]: x for x in crm.target_data(crm.connect(), crm.get_settings(crm.connect()), 2026, 1)["rows"]}
+check("quarter view", q1["Ravi"]["t_inr"] == 1000000 and q1["Ravi"]["a_inr"] == 400000 and q1["Ravi"]["pct_inr"] == 40, q1["Ravi"])
+check("analytics shows targets", b"Target" in c.get("/analytics?tfy=2026").data)
+check("analytics quarter filter", c.get("/analytics?tfy=2026&tq=2").status_code == 200)
+check("reports shows targets", b"Ravi" in c.get("/reports?tfy=2026").data)
+check("garbage tfy/tq tolerated", c.get("/analytics?tfy=zz&tq=99").status_code == 200)
+
+t = token(path="/admin/targets?fy=2026")
+r = c.post("/admin/targets?fy=2027", data={"_csrf": t, "copy_prev": "1"}, follow_redirects=True)
+check("copy previous FY ran", b"Copied 3" in r.data, r.data[:200])
+check("copied rows exist", crm.connect().execute("SELECT COUNT(*) FROM targets WHERE fy=2027").fetchone()[0] == 3)
+r = c.post("/admin/targets?fy=2027", data={"_csrf": t, "copy_prev": "1"}, follow_redirects=True)
+check("copy again does not overwrite", b"Copied 0" in r.data)
+
+r = c.get("/admin/targets/template.xlsx"); check("targets template", r.status_code == 200 and load_workbook(io.BytesIO(r.data))["Targets"]["A1"].value.startswith("Sales Rep"))
+wb = Workbook(); ws = wb.active; ws.title = "Targets"; ws.append(["Sales Rep*", "FY", "Quarter", "INR", "USD"])
+ws.append(["Asha", "FY2028", "Year", 4000000, 40000]); ws.append(["Ravi", 2028, "q3", 100, None]); ws.append(["", 2028, "Q1", 1, 1]); ws.append(["Zed", 2028, "Q9", 1, 1])
+bio = io.BytesIO(); wb.save(bio); bio.seek(0)
+t = token(path="/admin/targets")
+r = c.post("/admin/targets/import", data={"_csrf": t, "file": (bio, "t.xlsx")}, content_type="multipart/form-data", follow_redirects=True)
+check("import reports skipped rows", b"2 row(s) skipped" in r.data, r.data[-400:])
+rows = crm.connect().execute("SELECT quarter, value_inr FROM targets WHERE fy=2028 AND lower(rep)='asha' ORDER BY quarter").fetchall()
+check("Year spreads evenly over 4 quarters", [x[1] for x in rows] == [1000000] * 4, [tuple(x) for x in rows])
+check("import upserts (case-insensitive rep)", crm.connect().execute("SELECT COUNT(*) FROM targets WHERE fy=2028 AND lower(rep)='ravi'").fetchone()[0] == 1)
+bio = io.BytesIO(b"not an xlsx"); r = c.post("/admin/targets/import", data={"_csrf": t, "file": (bio, "t.xlsx")}, content_type="multipart/form-data", follow_redirects=True)
+check("bad workbook handled", b"Could not read" in r.data)
+
+for pth in ("/admin/targets", "/admin/targets/template.xlsx"):
+    check(f"non-admin blocked {pth}", sc.get(pth).status_code in (302, 403))
+_r = sc.post("/admin/targets", data={"_csrf": token(sc, "/records"), "rep": ["X"], "t0_1_inr": "5"})
+check("non-admin cannot post targets", _r.status_code in (302, 403) and not crm.connect().execute("SELECT 1 FROM targets WHERE rep='X'").fetchone(), _r.status_code)
+check("targets audit-logged", crm.connect().execute("SELECT COUNT(*) FROM audit_log WHERE action IN ('targets_saved','targets_copied','targets_import')").fetchone()[0] >= 3)
 
 print("backend:", "PostgreSQL" if crm.USE_PG else "SQLite")
 print("\nFAILED:" if fails else "\nALL PASSED", fails)

@@ -77,6 +77,13 @@
         options: { scales: { x: noGrid, y: { grid: { color: GRID }, border: { display: false }, beginAtZero: true, ticks: { precision: 0 } } },
           plugins: { legend: { display: false } } } };
     },
+    "c-targets": function (c) {
+      var T = D.targets;
+      return { type: "bar", data: { labels: T.labels, datasets: [bars("Target", T["t_" + c], "#e9d8da"), bars("Achieved", T["a_" + c], C.brand), bars("Pipeline (weighted)", T["w_" + c], "#f6a5ac")] },
+        options: { scales: { x: noGrid, y: axisMoney(c) }, plugins: { legend: { position: "bottom" }, tooltip: moneyTip(c, function (items) {
+          var i = items[0].dataIndex, t = T["t_" + c][i], a = T["a_" + c][i];
+          return t ? ["Attainment: " + Math.round(100 * a / t) + "%"] : []; }) } } };
+    },
     "c-product": function (c) { return hbar(D.product, c); },
     "c-offering": function (c) { return doughnut(D.offering, c); },
     "c-prodwon": function (c) { return doughnut(D.prodwon, c); },

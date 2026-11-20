@@ -76,6 +76,13 @@ TOOLS = [
         "description": "Full details (including notes) of one record by id or exact company name.",
         "parameters": {"type": "object", "properties": {"id": {"type": "integer"}, "company": {"type": "string"}}}}},
     {"type": "function", "function": {
+        "name": "target_vs_achievement",
+        "description": "Sales targets versus achievement (closed clients) per sales rep, with weighted pipeline and projected attainment. "
+                       "Defaults to the current financial year, full year.",
+        "parameters": {"type": "object", "properties": {
+            "financial_year": {"type": "integer", "description": "Year the financial year STARTS in, e.g. 2026 (omit for the current one)."},
+            "quarter": {"type": "integer", "enum": [0, 1, 2, 3, 4], "description": "0 or omitted = full year."}}}}},
+    {"type": "function", "function": {
         "name": "list_products",
         "description": "The product master (the allowed Product values).",
         "parameters": {"type": "object", "properties": {}}}},
@@ -174,6 +181,13 @@ def run_tool(name, args, ctx):
         if "notes" in d:
             d["notes"] = "(untrusted text) " + str(d["notes"])[:500]
         return d
+    if name == "target_vs_achievement":
+        t = ctx["targets"](args.get("financial_year"), args.get("quarter") or 0)
+        keep = ("name", "t_inr", "a_inr", "pct_inr", "gap_inr", "w_inr", "proj_inr", "t_usd", "a_usd", "pct_usd", "gap_usd", "w_usd", "proj_usd", "a_n")
+        return {"financial_year": t["fy_name"], "period": t["period"], "any_target_set": t["any_target"],
+                "reps": [{k: round(r[k], 2) if isinstance(r[k], float) else r[k] for k in keep} for r in t["rows"][:25]],
+                "total": {k: round(t["total"][k], 2) if isinstance(t["total"][k], float) else t["total"][k] for k in keep if k in t["total"]},
+                "note": "pct = achieved/target %, proj = (achieved+weighted pipeline)/target %. INR and USD are separate."}
     if name == "list_products":
         return {"products": ctx["products"]()}
     return {"error": "unknown tool"}

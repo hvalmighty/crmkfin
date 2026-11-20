@@ -5,6 +5,8 @@
   <p class="sub" style="margin:0">Quarters use {% if g.cfg.fy_start_month == '1' %}calendar year{% else %}a financial year starting month {{ g.cfg.fy_start_month }}{% endif %} (change in Settings). INR (₹) and USD ($) amounts are tracked separately – nothing is converted.</p></div>
   <a class="btn alt" href="{{ url_for('download_export') }}">Download all data (.xlsx)</a></div>
 
+<div class="cur-wrap" data-cur="inr">{% set show_chart = false %}{% set show_q = true %}{% set own_toggle = true %}{% include "_targets.html" %}</div>
+
 <div class="card">
   <h2>Sales funnel</h2>
   {% include "_funnel.html" %}

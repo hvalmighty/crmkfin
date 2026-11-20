@@ -1,0 +1,1 @@
+{% if p is none %}<span class="muted">–</span>{% else %}<div class="prog {{ 'ok' if p >= 90 else ('warn' if p >= 50 else 'bad') }}"><i style="width:{{ [p, 100] | min }}%"></i></div><span class="prog-n">{{ p }}%</span>{% endif %}

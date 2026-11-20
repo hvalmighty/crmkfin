@@ -60,6 +60,7 @@
       {% if g.user.role == 'admin' %}
       <div class="nav-h">Admin</div>
       <a href="{{ url_for('users') }}" class="{{ 'on' if ep in ('users','user_new','user_edit') }}" title="Users"><svg class="i"><use href="#i-users"/></svg><span class="lbl">Users</span></a>
+      <a href="{{ url_for('targets_admin') }}" class="{{ 'on' if ep in ('targets_admin',) }}" title="Sales targets"><svg class="i"><use href="#i-award"/></svg><span class="lbl">Sales targets</span></a>
       <a href="{{ url_for('products') }}" class="{{ 'on' if ep == 'products' }}" title="Product master"><svg class="i"><use href="#i-layers"/></svg><span class="lbl">Product master</span></a>
       <a href="{{ url_for('settings') }}" class="{{ 'on' if ep == 'settings' }}" title="Settings"><svg class="i"><use href="#i-sliders"/></svg><span class="lbl">Settings</span></a>
       <a href="{{ url_for('audit_view') }}" class="{{ 'on' if ep == 'audit_view' }}" title="Activity"><svg class="i"><use href="#i-activity"/></svg><span class="lbl">Activity</span></a>

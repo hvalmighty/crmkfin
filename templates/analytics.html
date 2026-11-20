@@ -46,6 +46,8 @@
   {% else %}<p class="empty">Add some prospects to see highlights.</p>{% endif %}
 </div>
 
+{% set show_chart = true %}{% set show_q = false %}{% set own_toggle = false %}{% include "_targets.html" %}
+
 <div class="grid two">
   <div class="card"><div class="card-h"><h2>Pipeline by stage</h2></div><div class="chart-box"><canvas id="c-stages"></canvas></div></div>
   <div class="card"><div class="card-h"><h2>Forecast by expected closing month</h2></div><div class="chart-box"><canvas id="c-forecast"></canvas></div></div>
