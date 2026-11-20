@@ -6,6 +6,7 @@ Run (prod):  gunicorn -c gunicorn.conf.py app:app
 """
 import html as htmllib
 import io
+import json
 import logging
 import os
 import re
@@ -26,6 +27,7 @@ from flask import (Flask, abort, flash, g, redirect, render_template, request,
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.datavalidation import DataValidation
+import chat
 from werkzeug.security import check_password_hash, generate_password_hash
 
 log = logging.getLogger("crm")
@@ -851,7 +853,7 @@ def dashboard_data(conn, cfg):
 
 def breakdown(conn, field):
     """Pipeline + client summary grouped by a free-text field, ignoring upper/lower-case differences."""
-    assert field in ("region", "presales_lead", "product", "offering_type")
+    assert field in ("region", "presales_lead", "product", "offering_type", "owner", "source")
     groups = {}
     for r in conn.execute(f"SELECT {field} f, type, stage, value, value_usd, probability FROM records").fetchall():
         label = (r["f"] or "").strip()
@@ -1924,6 +1926,49 @@ def audit_view():
 
 
 # ---- admin: delete data
+# ---- assistant (chat)
+def chat_ctx():
+    cfg = g.cfg
+    return {"conn": g.db, "today": datetime.now(TZ).date(),
+            "analytics": lambda: analytics_data(g.db, cfg), "funnel": lambda: funnel(g.db),
+            "breakdown": lambda f: breakdown(g.db, f), "products": lambda: active_products(g.db)}
+
+
+@app.route("/assistant")
+@login_required
+def assistant():
+    return render_template("assistant.html", ready=chat.config() is not None)
+
+
+@app.route("/api/chat", methods=["POST"])
+@login_required
+def api_chat():
+    if chat.config() is None:
+        return {"error": "The assistant is not set up yet. Ask the admin to add the LLM_API_KEY setting."}, 503
+    try:
+        history = chat.clean_history(json.loads(request.form.get("messages", "[]")))
+    except ValueError:
+        history = []
+    if not history or history[-1]["role"] != "user":
+        return {"error": "Type a question first."}, 400
+    per_user, per_day = chat.limits()
+    now = utcnow()
+    n_user = g.db.execute("SELECT COUNT(*) FROM audit_log WHERE action='chat' AND username=? AND ts>?",
+                          (g.user["username"], iso(now - timedelta(hours=1)))).fetchone()[0]
+    n_day = g.db.execute("SELECT COUNT(*) FROM audit_log WHERE action='chat' AND ts>?",
+                         (iso(now - timedelta(days=1)),)).fetchone()[0]
+    if n_user >= per_user:
+        return {"error": f"You've reached the limit of {per_user} questions per hour. Please try again later."}, 429
+    if n_day >= per_day:
+        return {"error": "The assistant's daily limit has been reached (it runs on a free plan). Try again tomorrow."}, 429
+    audit(g.db, g.user["username"], "chat", "")       # counts usage only; questions are not stored
+    g.db.commit()
+    try:
+        return {"reply": chat.answer(history, chat_ctx())}
+    except chat.ChatError as e:
+        return {"error": str(e)}, 502
+
+
 # ---- admin: product master
 def product_rows():
     use = {}

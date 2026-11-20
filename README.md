@@ -97,3 +97,21 @@ TEST_DATABASE_URL=postgresql://user@host/emptydb python tests/smoke_test.py   # 
 - Admins manage the dropdown under **Product master** (add, rename, hide, delete if unused). It starts with mPower Wealth, mPower Asset Management, Pension admin and RTA.
 - In an Excel import, a product that is not in the master yet is added to it automatically (spelling is matched case-insensitively to the master). Columns: `Product`, `Product / Service` (placed after Region / Country in the template).
 - Analytics: pipeline by product, product vs service, closed-won by product, win rate by product, and a product scorecard; Reports has the same by product / product vs service.
+
+## Assistant (chat)
+
+A read-only chat page ("Assistant" in the sidebar): ask things like *"which deals are overdue?"*, *"compare products by pipeline and win rate"*, *"top 5 open deals by value"*.
+
+- It can **only look things up** through a few fixed read-only functions (pipeline summary, breakdowns, record search, record details, product list). It cannot add, change or delete data, and it never converts between INR and USD.
+- Uses any OpenAI-compatible AI service with a **free tier**. Default is Groq; Google Gemini and OpenRouter are built in.
+- Set these environment variables (Vercel → Settings → Environment Variables), then redeploy:
+
+| Variable | Meaning |
+|---|---|
+| `LLM_API_KEY` | API key from the provider (free, no card on Groq / Gemini). Without it the page says "not set up". |
+| `LLM_PROVIDER` | `groq` (default), `gemini` or `openrouter` |
+| `LLM_MODEL` | optional – override the model name if a provider retires one |
+| `LLM_BASE_URL` | optional – any other OpenAI-compatible endpoint |
+| `CHAT_PER_USER_HOUR` / `CHAT_PER_DAY` | optional limits (default 30 per user per hour, 300 per day in total) to stay inside free quotas |
+
+- Privacy: the question and the CRM rows needed to answer it are sent to the AI provider. Free plans of some providers may use that data to improve their models – check the provider's terms before using real customer data. The app stores only a usage count, never the questions.

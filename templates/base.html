@@ -30,6 +30,7 @@
     <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></symbol>
     <symbol id="i-percent" viewBox="0 0 24 24"><line x1="19" y1="5" x2="5" y2="19"/><circle cx="6.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/></symbol>
     <symbol id="i-award" viewBox="0 0 24 24"><circle cx="12" cy="8" r="7"/><polyline points="8.21 13.89 7 23 12 20 17 23 15.79 13.88"/></symbol>
+    <symbol id="i-chat" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></symbol>
     <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></symbol>
     <symbol id="i-pie" viewBox="0 0 24 24"><path d="M21.21 15.89A10 10 0 1 1 8 2.83"/><path d="M22 12A10 10 0 0 0 12 2v10z"/></symbol>
   </defs>
@@ -48,6 +49,7 @@
       <div class="nav-h">Overview</div>
       <a href="{{ url_for('dashboard') }}" class="{{ 'on' if ep == 'dashboard' }}"><svg class="i"><use href="#i-grid"/></svg>Dashboard</a>
       <a href="{{ url_for('analytics') }}" class="{{ 'on' if ep == 'analytics' }}"><svg class="i"><use href="#i-chart"/></svg>Analytics</a>
+      <a href="{{ url_for('assistant') }}" class="{{ 'on' if ep == 'assistant' }}"><svg class="i"><use href="#i-chat"/></svg>Assistant</a>
       <div class="nav-h">Pipeline</div>
       <a href="{{ url_for('records', type='prospect') }}" class="{{ 'on' if rec_ep and request.values.get('type') != 'client' }}"><svg class="i"><use href="#i-target"/></svg>Prospects</a>
       <a href="{{ url_for('records', type='client') }}" class="{{ 'on' if rec_ep and request.values.get('type') == 'client' }}"><svg class="i"><use href="#i-check"/></svg>Clients</a>
