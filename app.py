@@ -1737,6 +1737,16 @@ def records():
         args.append(stage)
     elif kind == "prospect" and stage == "open":
         where.append("stage!='Lost'")
+    due = request.args.get("due", "") if kind == "prospect" else ""
+    if due in ("overdue", "30"):
+        td = datetime.now(TZ).date()
+        where.append("stage!='Lost'")
+        if due == "overdue":
+            where.append("expected_close < ?"); args.append(td.isoformat())
+        else:
+            where.append("expected_close >= ? AND expected_close <= ?"); args += [td.isoformat(), (td + timedelta(days=30)).isoformat()]
+    else:
+        due = ""
     missing = request.args.get("missing", "")
     if missing in MISSING_FIELDS:
         where.append(f"{missing} IS NULL")
@@ -1751,7 +1761,7 @@ def records():
     rows = g.db.execute(f"SELECT * FROM records WHERE {w} ORDER BY {order} LIMIT ? OFFSET ?",
                         args + [PAGE_SIZE, (page - 1) * PAGE_SIZE]).fetchall()
     return render_template("records.html", kind=kind, rows=rows, q=q, stage=stage, page=page,
-                           pages=pages, total=total, today=datetime.now(TZ).date().isoformat(), missing=missing,
+                           pages=pages, total=total, today=datetime.now(TZ).date().isoformat(), missing=missing, due=due,
                            missing_label=dict((f[0], f[1]) for f in DQ_FIELDS).get(missing, ""))
 
 
@@ -2343,6 +2353,29 @@ def targets_import():
 
 
 
+
+
+# ---- notifications (bell)
+@app.route("/api/notifications")
+@login_required
+def api_notifications():
+    today = datetime.now(TZ).date()
+    rows = g.db.execute(
+        "SELECT id, company, owner, stage, expected_close FROM records WHERE type='prospect' AND stage!='Lost' "
+        "AND expected_close <= ? ORDER BY expected_close, lower(company)", ((today + timedelta(days=30)).isoformat(),)).fetchall()
+    over, soon = [], []
+    for r in rows:
+        try:
+            days = (date.fromisoformat(str(r["expected_close"])[:10]) - today).days
+        except ValueError:
+            continue
+        item = {"label": r["company"], "url": url_for("record_edit", rid=r["id"]), "days": days,
+                "sub": f"{r['stage']}" + (f" \u00b7 {r['owner']}" if r["owner"] else "") + f" \u00b7 {fmt_date(r['expected_close'])}"}
+        (over if days < 0 else soon).append(item)
+    over.sort(key=lambda i: i["days"])         # most overdue first
+    return jsonify(overdue_n=len(over), upcoming_n=len(soon), overdue=over[:8], upcoming=soon[:8],
+                   overdue_url=url_for("records", type="prospect", due="overdue"),
+                   upcoming_url=url_for("records", type="prospect", due="30"))
 
 # ---- global search
 SEARCH_COLS = ("company", "contact_name", "email", "owner", "presales_lead", "region", "product", "phone")

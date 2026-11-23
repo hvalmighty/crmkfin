@@ -179,3 +179,45 @@ document.addEventListener("submit", function (e) {
     if (ev.key === "/" && !/^(INPUT|TEXTAREA|SELECT)$/.test((document.activeElement || {}).tagName || "")) { ev.preventDefault(); inp.focus(); inp.select(); }
   });
 })();
+
+
+// Notification bell: overdue and upcoming (30 days) prospect closures.
+(function () {
+  var box = document.getElementById("bell");
+  if (!box) return;
+  var btn = document.getElementById("bell-btn"), pop = document.getElementById("bell-pop"), badge = document.getElementById("bell-n");
+  function el(tag, cls, txt) { var e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; }
+  function when(d) { return d === 0 ? "Due today" : d === 1 ? "Tomorrow" : d > 1 ? "In " + d + " days" : (-d === 1 ? "1 day overdue" : -d + " days overdue"); }
+  function section(title, cls, n, list, url) {
+    var s = el("div", "bell-sec " + cls); s.appendChild(el("div", "bell-h", title + " (" + n + ")"));
+    list.forEach(function (it) {
+      var a = el("a", "bell-it"); a.href = it.url;
+      a.appendChild(el("span", "bell-t", it.label)); a.appendChild(el("span", "bell-w", when(it.days)));
+      a.appendChild(el("span", "bell-s", it.sub)); s.appendChild(a);
+    });
+    if (n > list.length) { var m = el("a", "bell-more", "View all " + n + " \u2192"); m.href = url; s.appendChild(m); }
+    else if (n) { var m2 = el("a", "bell-more", "Open in list \u2192"); m2.href = url; s.appendChild(m2); }
+    return s;
+  }
+  function paint(d) {
+    var n = d.overdue_n + d.upcoming_n;
+    badge.hidden = !n; badge.textContent = n > 99 ? "99+" : n; badge.className = "bell-n" + (d.overdue_n ? " red" : "");
+    btn.setAttribute("aria-label", "Notifications: " + d.overdue_n + " overdue, " + d.upcoming_n + " upcoming");
+    pop.textContent = "";
+    if (!n) { pop.appendChild(el("div", "bell-empty", "All clear - nothing overdue or closing in the next 30 days.")); return; }
+    if (d.overdue_n) pop.appendChild(section("Overdue", "over", d.overdue_n, d.overdue, d.overdue_url));
+    if (d.upcoming_n) pop.appendChild(section("Closing in next 30 days", "soon", d.upcoming_n, d.upcoming, d.upcoming_url));
+  }
+  function load() {
+    return fetch(box.getAttribute("data-url"), { credentials: "same-origin", headers: { Accept: "application/json" } })
+      .then(function (r) { return r.ok ? r.json() : null; }).then(function (d) { if (d) paint(d); }).catch(function () {});
+  }
+  btn.addEventListener("click", function (ev) {
+    ev.stopPropagation();
+    var open = pop.hidden; pop.hidden = !open; btn.setAttribute("aria-expanded", String(open));
+    if (open) load();
+  });
+  document.addEventListener("click", function (ev) { if (!box.contains(ev.target)) { pop.hidden = true; btn.setAttribute("aria-expanded", "false"); } });
+  document.addEventListener("keydown", function (ev) { if (ev.key === "Escape" && !pop.hidden) { pop.hidden = true; btn.focus(); } });
+  setTimeout(load, 400);               // after the page is up, so it never delays the first paint
+})();

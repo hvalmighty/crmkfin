@@ -663,5 +663,25 @@ check("search requires login", crm.app.test_client().get("/api/search?q=zeph").s
 check("search box on pages", b'id="gsearch"' in c.get("/analytics").data)
 check("search xss escaped", b"<script>alert" not in c.get("/search?q=%3Cscript%3Ealert(1)%3C/script%3E").data)
 
+# 23. notification bell
+_td = crm.datetime.now(crm.TZ).date()
+_d = lambda n: (_td + crm.timedelta(days=n)).isoformat()
+rec(type="prospect", company="BellOver", owner="Ravi", stage="Proposal", expected_close=_d(-5), value="1")
+rec(type="prospect", company="BellSoon", owner="Ravi", stage="Lead", expected_close=_d(3), value="1")
+rec(type="prospect", company="BellFar", owner="Ravi", stage="Lead", expected_close=_d(45), value="1")
+rec(type="prospect", company="BellLost", owner="Ravi", stage="Lost", expected_close=_d(-9), value="1")
+nj = c.get("/api/notifications").get_json()
+check("bell overdue list", any(i["label"] == "BellOver" and i["days"] == -5 for i in nj["overdue"]), nj["overdue"])
+check("bell upcoming list", any(i["label"] == "BellSoon" and i["days"] == 3 for i in nj["upcoming"]))
+check("bell excludes later than 30 days and Lost", not any(i["label"] in ("BellFar", "BellLost") for i in nj["overdue"] + nj["upcoming"]))
+check("bell counts", nj["overdue_n"] >= 1 and nj["upcoming_n"] >= 1 and len(nj["overdue"]) <= 8)
+check("bell most overdue first", [i["days"] for i in nj["overdue"]] == sorted(i["days"] for i in nj["overdue"]))
+check("bell requires login", crm.app.test_client().get("/api/notifications").status_code == 302)
+check("bell on pages", b'id="bell"' in c.get("/analytics").data)
+ov = c.get("/records?type=prospect&due=overdue").data; so = c.get("/records?type=prospect&due=30").data
+check("overdue list filter", b"BellOver" in ov and b"BellSoon" not in ov and b"BellLost" not in ov and b"Overdue closures" in ov)
+check("30-day list filter", b"BellSoon" in so and b"BellOver" not in so and b"BellFar" not in so)
+check("bad due value ignored", c.get("/records?type=prospect&due=zz").status_code == 200)
+
 print("backend:", "PostgreSQL" if crm.USE_PG else "SQLite")
 print("\nFAILED:" if fails else "\nALL PASSED", fails)

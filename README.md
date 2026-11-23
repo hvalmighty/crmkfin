@@ -98,6 +98,9 @@ TEST_DATABASE_URL=postgresql://user@host/emptydb python tests/smoke_test.py   # 
 - In an Excel import, a product that is not in the master yet is added to it automatically (spelling is matched case-insensitively to the master). Columns: `Product`, `Product / Service` (placed after Region / Country in the template).
 - Analytics: pipeline by product, product vs service, closed-won by product, win rate by product, and a product scorecard; Reports has the same by product / product vs service.
 
+## Notification bell
+The bell in the top bar shows how many open prospects are **overdue** (expected closure date passed) or **closing in the next 30 days**; the badge is red when something is overdue. Click it for the list (most overdue first), click a name to open the record, or "View all" for the filtered prospect list. Lost prospects are excluded.
+
 ## Global search
 The thin search box in the top bar suggests as you type (2+ characters): prospects/clients (company, contact, e-mail, owner, presales, region, product, phone), sales reps and products. Use the arrow keys and Enter, or press `/` anywhere to jump to it. Pressing Enter on plain text opens a results page covering both prospects and clients.
 
