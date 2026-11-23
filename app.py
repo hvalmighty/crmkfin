@@ -22,7 +22,7 @@ from functools import wraps
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
-from flask import (Flask, abort, flash, g, redirect, render_template, request,
+from flask import (Flask, abort, flash, g, has_request_context, redirect, render_template, request,
                    send_file, session, url_for)
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -216,6 +216,8 @@ class DB:
         return sql.replace("%", "%%").replace("?", "%s")
 
     def execute(self, sql, params=()):
+        if has_request_context():
+            g.nq = getattr(g, "nq", 0) + 1
         if USE_PG:
             sql = self._pg(sql)
         return self.conn.execute(sql, params)
@@ -236,6 +238,8 @@ class DB:
     def close(self):
         if not self.pooled:
             self.conn.close()
+            return
+        if self.conn.autocommit:  # read-only request: no transaction was opened, nothing to end (saves 2 round trips)
             return
         try:                      # keep the connection for the next request, but end this request's transaction
             self.conn.rollback()
@@ -266,7 +270,7 @@ def _new_pg():
     raise last
 
 
-def connect(reuse=False):
+def connect(reuse=False, autocommit=False):
     """reuse=True (web requests): keep the PostgreSQL connection open between requests handled by the same
     warm instance, which saves the TCP + TLS + login round-trips on every page."""
     if USE_PG:
@@ -285,6 +289,11 @@ def connect(reuse=False):
         if c is None:
             c = _tls.conn = _new_pg()
         _tls.used = time.time()
+        if c.autocommit != autocommit:
+            try:
+                c.autocommit = autocommit
+            except Exception:         # a transaction was left open: end it, then switch
+                c.rollback(); c.autocommit = autocommit
         return DB(c, pooled=True)
     os.makedirs(DATA_DIR, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=30)
@@ -1536,8 +1545,10 @@ def before():
         sent = request.form.get("_csrf", "")
         if not sent or not secrets.compare_digest(sent, session.get("_csrf", "")):
             abort(400)
+    g.t0 = time.perf_counter(); g.nq = 0
     ensure_init()
-    g.db = connect(reuse=True)
+    # Plain page views run in autocommit mode on PostgreSQL: no BEGIN / ROLLBACK round trips to a remote database.
+    g.db = connect(reuse=True, autocommit=request.method in ("GET", "HEAD"))
     g.cfg = cached_settings(g.db)
     g.user = None
     uid = session.get("uid")
@@ -1566,6 +1577,9 @@ def secure_headers(resp):
         "frame-ancestors 'none'; form-action 'self'; base-uri 'self'")
     if request.endpoint != "static":
         resp.headers["Cache-Control"] = "no-store"
+        t0 = getattr(g, "t0", None)
+        if t0 is not None:        # visible in the browser's Network tab -> Timing; shows server time and DB round trips
+            resp.headers["Server-Timing"] = f'app;dur={(time.perf_counter() - t0) * 1000:.0f}, db;desc="{getattr(g, "nq", 0)} queries"' 
     if app.config["SESSION_COOKIE_SECURE"]:
         resp.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return resp
@@ -2327,6 +2341,68 @@ def targets_import():
     fy = items[0][1] if items else None
     return redirect(url_for("targets_admin", fy=fy) if fy else url_for("targets_admin"))
 
+
+
+# ---- admin: speed check
+def db_location(url):
+    """(host, cloud region guess, pooled?) from a Postgres URL, without exposing credentials."""
+    from urllib.parse import urlparse
+    host = urlparse(url).hostname or ""
+    m = re.search(r"\b((?:us|eu|ap|sa|ca|me|af)-[a-z]+-\d)\b", host)
+    return host, (m.group(1) if m else None), ("-pooler" in host or "pooler" in host)
+
+
+# Vercel region -> the AWS region it sits in (used to compare with the database region)
+VERCEL_TO_AWS = {"iad1": "us-east-1", "cle1": "us-east-2", "sfo1": "us-west-1", "pdx1": "us-west-2", "bom1": "ap-south-1",
+                 "sin1": "ap-southeast-1", "syd1": "ap-southeast-2", "hnd1": "ap-northeast-1", "icn1": "ap-northeast-2",
+                 "fra1": "eu-central-1", "dub1": "eu-west-1", "lhr1": "eu-west-2", "cdg1": "eu-west-3", "arn1": "eu-north-1",
+                 "gru1": "sa-east-1", "yul1": "ca-central-1"}
+
+
+@app.route("/admin/speed")
+@admin_required
+def speed_check():
+    info = {"backend": "PostgreSQL" if USE_PG else "SQLite", "on_vercel": ON_VERCEL,
+            "vercel_region": os.environ.get("VERCEL_REGION") or "", "verdicts": []}
+    pings, connect_ms = [], None
+    if USE_PG:
+        host, region, pooled = db_location(DATABASE_URL)
+        info.update(host=host, db_region=region, pooled=pooled)
+        t = time.perf_counter(); tmp = _new_pg(); connect_ms = (time.perf_counter() - t) * 1000
+        try:
+            tmp.autocommit = True
+            for _ in range(6):
+                t = time.perf_counter(); tmp.execute("SELECT 1").fetchone(); pings.append((time.perf_counter() - t) * 1000)
+        finally:
+            tmp.close()
+        pings = pings[1:]
+    else:
+        for _ in range(5):
+            t = time.perf_counter(); g.db.execute("SELECT 1").fetchone(); pings.append((time.perf_counter() - t) * 1000)
+    rtt = sum(pings) / len(pings)
+    info.update(rtt=rtt, connect_ms=connect_ms, queries_per_page=5)
+    est = rtt * 5
+    info["est_page_ms"] = est
+    v = info["verdicts"]
+    if not USE_PG:
+        v.append(("ok", "SQLite on local disk: no network latency."))
+    elif rtt < 15:
+        v.append(("ok", f"Database round trip is {rtt:.0f} ms - the database is close to the app. Slowness is not from the database distance."))
+    else:
+        v.append(("bad" if rtt > 60 else "warn", f"Each database call takes ~{rtt:.0f} ms. A page makes 3-12 calls, so expect roughly {est/1000:.1f}-{rtt*12/1000:.1f} s per page from distance alone."))
+    if USE_PG and connect_ms and connect_ms > 400:
+        v.append(("bad" if connect_ms > 1500 else "warn", f"Opening a new connection took {connect_ms:.0f} ms (paid on each cold start). "
+                  + ("A value above ~1.5 s usually means the free database was asleep and woke up." if connect_ms > 1500 else "Distance and TLS setup add up here.")))
+    if USE_PG and ON_VERCEL:
+        aws = VERCEL_TO_AWS.get(info["vercel_region"])
+        if info.get("db_region") and aws and aws != info["db_region"]:
+            v.append(("bad", f"App runs in {info['vercel_region']} ({aws}) but the database is in {info['db_region']}. "
+                             "Pin the app next to the database: set \"regions\" in vercel.json (see the README, Speed on Vercel) and redeploy."))
+        elif not info.get("db_region"):
+            v.append(("warn", "Could not tell the database region from its address. Compare it with the app region shown here."))
+        if not info.get("pooled"):
+            v.append(("warn", "The database address is not the pooled one (no '-pooler' in the host). Use Neon's pooled connection string for serverless."))
+    return render_template("speed.html", i=info, pings=pings)
 
 # ---- admin: product master
 def product_rows():

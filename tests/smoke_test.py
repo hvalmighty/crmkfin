@@ -628,5 +628,23 @@ _r = sc.post("/admin/targets", data={"_csrf": token(sc, "/records"), "rep": ["X"
 check("non-admin cannot post targets", _r.status_code in (302, 403) and not crm.connect().execute("SELECT 1 FROM targets WHERE rep='X'").fetchone(), _r.status_code)
 check("targets audit-logged", crm.connect().execute("SELECT COUNT(*) FROM audit_log WHERE action IN ('targets_saved','targets_copied','targets_import')").fetchone()[0] >= 3)
 
+# 21. speed check + request timing + autocommit for page views
+r = c.get("/admin/speed"); check("speed check page (admin)", r.status_code == 200 and b"Round trip to the database" in r.data, r.status_code)
+check("speed check blocked for non-admin", sc.get("/admin/speed").status_code in (302, 403))
+r = c.get("/analytics"); st = r.headers.get("Server-Timing", "")
+check("Server-Timing header reports time + queries", "app;dur=" in st and "queries" in st, st)
+check("location parser", crm.db_location("postgresql://u:p@ep-x-pooler.ap-southeast-1.aws.neon.tech/db") == ("ep-x-pooler.ap-southeast-1.aws.neon.tech", "ap-southeast-1", True))
+t = token(path="/records/new")
+r = c.post("/records/new", data={"_csrf": t, "type": "prospect", "company": "AutoCommitCo", "stage": "Lead"}, follow_redirects=True)
+check("write after read-only requests still commits", b"AutoCommitCo" in r.data)
+rid = crm.connect().execute("SELECT id FROM records WHERE company='AutoCommitCo'").fetchone()[0]
+for _ in range(3):
+    c.get("/records?type=prospect"); c.get(f"/records/{rid}/edit")
+t = token(path=f"/records/{rid}/edit")
+r = c.post(f"/records/{rid}/edit", data={"_csrf": t, "type": "prospect", "company": "AutoCommitCo2", "stage": "Lead"}, follow_redirects=True)
+check("edit after reads commits and shows", b"AutoCommitCo2" in r.data)
+r = c.post(f"/records/{rid}/edit", data={"_csrf": t, "type": "prospect", "company": "", "stage": "Lead"})
+check("failed validation leaves data unchanged", crm.connect().execute("SELECT company FROM records WHERE id=?", (rid,)).fetchone()[0] == "AutoCommitCo2")
+
 print("backend:", "PostgreSQL" if crm.USE_PG else "SQLite")
 print("\nFAILED:" if fails else "\nALL PASSED", fails)

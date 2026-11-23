@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Speed check{% endblock %}
+{% block content %}
+<div class="bar"><div class="grow"><h1>Speed check</h1>
+  <p class="sub" style="margin:0">Measures, from the server itself, how far the app is from its database. Reload to measure again.</p></div></div>
+
+<div class="card">
+  <h2>Diagnosis</h2>
+  {% for lvl, msg in i.verdicts %}
+  <p style="margin:6px 0"><span class="pill {{ 'on' if lvl == 'ok' else 'off' }}">{{ {'ok':'OK','warn':'Check','bad':'Problem'}[lvl] }}</span> {{ msg }}</p>
+  {% endfor %}
+</div>
+
+<div class="card flush"><div class="scroll"><table>
+  <tr><th>Measure</th><th>Value</th></tr>
+  <tr><td>Database</td><td>{{ i.backend }}{% if i.host %} - {{ i.host }}{% endif %}</td></tr>
+  <tr><td>Database region</td><td>{{ i.db_region or "unknown" }}{% if i.pooled is defined %} ({{ "pooled" if i.pooled else "direct, not pooled" }}){% endif %}</td></tr>
+  <tr><td>App region</td><td>{{ i.vercel_region or ("not on Vercel" if not i.on_vercel else "unknown") }}</td></tr>
+  <tr><td>Round trip to the database</td><td><strong>{{ "%.0f"|format(i.rtt) }} ms</strong> each ({% for p in pings %}{{ "%.0f"|format(p) }}{{ ", " if not loop.last }}{% endfor %} ms)</td></tr>
+  {% if i.connect_ms is not none %}<tr><td>Opening a new connection</td><td>{{ "%.0f"|format(i.connect_ms) }} ms</td></tr>{% endif %}
+  <tr><td>Typical page (about 5 calls)</td><td>~{{ "%.0f"|format(i.est_page_ms) }} ms from distance alone</td></tr>
+</table></div></div>
+<p class="sub">Every page also reports its own server time and number of database calls in the browser (Network tab, <code>Server-Timing</code>).</p>
+{% endblock %}
