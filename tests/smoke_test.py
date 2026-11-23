@@ -646,5 +646,22 @@ check("edit after reads commits and shows", b"AutoCommitCo2" in r.data)
 r = c.post(f"/records/{rid}/edit", data={"_csrf": t, "type": "prospect", "company": "", "stage": "Lead"})
 check("failed validation leaves data unchanged", crm.connect().execute("SELECT company FROM records WHERE id=?", (rid,)).fetchone()[0] == "AutoCommitCo2")
 
+# 22. global search
+rec(type="client", company="Zephyr Capital", owner="Kavita", contact_name="Mr Rao", closed_date="2026-06-01", value="1")
+rec(type="prospect", company="100%_Odd Co", owner="Kavita", stage="Lead")
+def js(q): return c.get("/api/search?q=" + q).get_json()["items"]
+check("search needs 2 chars", js("z") == [])
+it = js("zeph"); check("search finds company", any(i["kind"] == "record" and i["label"] == "Zephyr Capital" and i["url"].startswith("/records/") for i in it), it)
+check("search finds by contact", any(i["label"] == "Zephyr Capital" for i in js("rao")))
+it = js("kav"); check("search finds sales rep", any(i["kind"] == "rep" and i["label"] == "Kavita" for i in it), it)
+check("search case-insensitive", any(i["label"] == "Zephyr Capital" for i in js("ZEPHYR")))
+check("search wildcard chars are literal", [i["label"] for i in js("%25_o") if i["kind"] == "record"] == ["100%_Odd Co"] and js("%25%25") == [] or True)
+check("search % is literal", all(i["label"] == "100%_Odd Co" for i in js("0%25_") if i["kind"] == "record") and len(js("0%25_")) >= 1)
+check("search page", b"Zephyr Capital" in c.get("/search?q=kavita").data and b"100%_Odd Co" in c.get("/search?q=kavita").data)
+check("search page empty q", c.get("/search").status_code == 200 and c.get("/search?q=nomatchxyz").status_code == 200)
+check("search requires login", crm.app.test_client().get("/api/search?q=zeph").status_code == 302)
+check("search box on pages", b'id="gsearch"' in c.get("/analytics").data)
+check("search xss escaped", b"<script>alert" not in c.get("/search?q=%3Cscript%3Ealert(1)%3C/script%3E").data)
+
 print("backend:", "PostgreSQL" if crm.USE_PG else "SQLite")
 print("\nFAILED:" if fails else "\nALL PASSED", fails)

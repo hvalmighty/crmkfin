@@ -120,3 +120,62 @@ document.addEventListener("submit", function (e) {
   }
   f.addEventListener("input", recalc); recalc();
 })();
+
+
+// Global search with predictive suggestions.
+(function () {
+  var f = document.getElementById("gsearch");
+  if (!f) return;
+  var inp = document.getElementById("gs-input"), list = document.getElementById("gs-list");
+  var items = [], act = -1, timer = null, seq = 0;
+  var tag = { record: "", rep: "Rep", product: "Product" };
+  function close() { list.hidden = true; inp.setAttribute("aria-expanded", "false"); act = -1; }
+  function mark(txt, q) {                      // bold the matched part, safely (no innerHTML)
+    var frag = document.createDocumentFragment(), i = txt.toLowerCase().indexOf(q.toLowerCase());
+    if (i < 0) { frag.appendChild(document.createTextNode(txt)); return frag; }
+    frag.appendChild(document.createTextNode(txt.slice(0, i)));
+    var b = document.createElement("b"); b.textContent = txt.slice(i, i + q.length); frag.appendChild(b);
+    frag.appendChild(document.createTextNode(txt.slice(i + q.length))); return frag;
+  }
+  function render(q) {
+    list.textContent = "";
+    if (!items.length) { var e = document.createElement("li"); e.className = "gs-empty"; e.textContent = "No matches - press Enter to search everything"; list.appendChild(e); }
+    items.forEach(function (it, n) {
+      var li = document.createElement("li"); li.setAttribute("role", "option"); li.id = "gs-" + n; li.className = "gs-it " + it.kind;
+      var a = document.createElement("a"); a.href = it.url;
+      var t = document.createElement("span"); t.className = "gs-t"; t.appendChild(mark(it.label, q));
+      var s = document.createElement("span"); s.className = "gs-s"; s.textContent = it.sub;
+      a.appendChild(t); a.appendChild(s); li.appendChild(a);
+      li.addEventListener("mousedown", function (ev) { ev.preventDefault(); });   // keep focus so the click lands
+      list.appendChild(li);
+    });
+    list.hidden = false; inp.setAttribute("aria-expanded", "true");
+  }
+  function setAct(n) {
+    var els = list.querySelectorAll(".gs-it");
+    els.forEach(function (e) { e.classList.remove("on"); e.removeAttribute("aria-selected"); });
+    act = els.length ? (n + els.length) % els.length : -1;
+    if (act >= 0) { els[act].classList.add("on"); els[act].setAttribute("aria-selected", "true"); inp.setAttribute("aria-activedescendant", els[act].id); els[act].scrollIntoView({ block: "nearest" }); }
+  }
+  function fetchNow() {
+    var q = inp.value.trim();
+    if (q.length < 2) { close(); return; }
+    var my = ++seq;
+    fetch(f.getAttribute("data-url") + "?q=" + encodeURIComponent(q), { credentials: "same-origin", headers: { Accept: "application/json" } })
+      .then(function (r) { return r.ok ? r.json() : { items: [] }; })
+      .then(function (d) { if (my !== seq) return; items = d.items || []; render(q); })
+      .catch(function () { close(); });
+  }
+  inp.addEventListener("input", function () { clearTimeout(timer); timer = setTimeout(fetchNow, 180); });
+  inp.addEventListener("focus", function () { if (inp.value.trim().length >= 2 && items.length) list.hidden = false; });
+  inp.addEventListener("blur", function () { setTimeout(close, 120); });
+  inp.addEventListener("keydown", function (ev) {
+    if (ev.key === "ArrowDown") { ev.preventDefault(); if (list.hidden) fetchNow(); else setAct(act + 1); }
+    else if (ev.key === "ArrowUp") { ev.preventDefault(); setAct(act - 1); }
+    else if (ev.key === "Escape") { close(); inp.blur(); }
+    else if (ev.key === "Enter" && act >= 0 && !list.hidden) { ev.preventDefault(); window.location.href = items[act].url; }
+  });
+  document.addEventListener("keydown", function (ev) {   // "/" focuses the search box
+    if (ev.key === "/" && !/^(INPUT|TEXTAREA|SELECT)$/.test((document.activeElement || {}).tagName || "")) { ev.preventDefault(); inp.focus(); inp.select(); }
+  });
+})();

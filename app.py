@@ -22,7 +22,7 @@ from functools import wraps
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
-from flask import (Flask, abort, flash, g, has_request_context, redirect, render_template, request,
+from flask import (Flask, abort, flash, g, has_request_context, jsonify, redirect, render_template, request,
                    send_file, session, url_for)
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -2342,6 +2342,51 @@ def targets_import():
     return redirect(url_for("targets_admin", fy=fy) if fy else url_for("targets_admin"))
 
 
+
+
+# ---- global search
+SEARCH_COLS = ("company", "contact_name", "email", "owner", "presales_lead", "region", "product", "phone")
+
+
+def like_escape(q):
+    return q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def search_records(db, q, limit):
+    pat = f"%{like_escape(q)}%"
+    cond = " OR ".join(f"{c} {LIKE_OP} ? ESCAPE '\\'" for c in SEARCH_COLS)
+    return db.execute(f"SELECT id, type, company, contact_name, owner, stage, product, closed_date FROM records WHERE {cond} "
+                      f"ORDER BY CASE WHEN lower(company) LIKE ? THEN 0 ELSE 1 END, lower(company) LIMIT ?",
+                      [pat] * len(SEARCH_COLS) + [like_escape(q.lower()) + "%", limit]).fetchall()
+
+
+@app.route("/api/search")
+@login_required
+def api_search():
+    q = request.args.get("q", "").strip()[:60]
+    if len(q) < 2:
+        return jsonify(items=[])
+    pat = f"%{like_escape(q)}%"
+    items = []
+    for r in search_records(g.db, q, 7):
+        sub = ("Client" if r["type"] == "client" else f"Prospect \u00b7 {r['stage']}") + (f" \u00b7 {r['owner']}" if r["owner"] else "")
+        if r["contact_name"]:
+            sub += f" \u00b7 {r['contact_name']}"
+        items.append({"kind": "record", "label": r["company"], "sub": sub, "url": url_for("record_edit", rid=r["id"])})
+    for r in g.db.execute(f"SELECT owner, COUNT(*) AS n FROM records WHERE owner {LIKE_OP} ? ESCAPE '\\' GROUP BY owner "
+                          "ORDER BY n DESC LIMIT 3", (pat,)).fetchall():
+        items.append({"kind": "rep", "label": r["owner"], "sub": f"Sales rep \u00b7 {r['n']} record(s)", "url": url_for("search_page", q=r["owner"])})
+    for r in g.db.execute(f"SELECT name FROM products WHERE name {LIKE_OP} ? ESCAPE '\\' ORDER BY lower(name) LIMIT 2", (pat,)).fetchall():
+        items.append({"kind": "product", "label": r["name"], "sub": "Product", "url": url_for("search_page", q=r["name"])})
+    return jsonify(items=items)
+
+
+@app.route("/search")
+@login_required
+def search_page():
+    q = request.args.get("q", "").strip()[:60]
+    rows = search_records(g.db, q, 200) if q else []
+    return render_template("search.html", q=q, rows=rows)
 
 # ---- admin: speed check
 def db_location(url):

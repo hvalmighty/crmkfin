@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Search{% endblock %}
+{% block content %}
+<div class="bar"><div class="grow"><h1>Search{% if q %}: {{ q }}{% endif %}</h1>
+  <p class="sub" style="margin:0">{% if q %}{{ rows|length }}{{ '+' if rows|length >= 200 }} match(es) across prospects and clients - name, contact, e-mail, owner, presales, region, product, phone.{% else %}Type in the search box at the top.{% endif %}</p></div></div>
+{% if q %}
+<div class="card flush"><div class="scroll"><table>
+  <tr><th>Company</th><th>Type</th><th>Stage / closed</th><th>Owner</th><th>Contact</th><th>Product</th></tr>
+  {% for r in rows %}
+  <tr>
+    <td><a href="{{ url_for('record_edit', rid=r.id) }}"><strong>{{ r.company }}</strong></a></td>
+    <td>{{ 'Client' if r.type == 'client' else 'Prospect' }}</td>
+    <td>{% if r.type == 'client' %}{{ r.closed_date|fdate }}{% else %}<span class="pill {{ r.stage }}">{{ r.stage }}</span>{% endif %}</td>
+    <td>{{ r.owner or '' }}</td><td>{{ r.contact_name or '' }}</td><td>{{ r.product or '' }}</td>
+  </tr>
+  {% else %}<tr><td colspan="6" class="empty">Nothing found for "{{ q }}".</td></tr>{% endfor %}
+</table></div></div>
+{% endif %}
+{% endblock %}

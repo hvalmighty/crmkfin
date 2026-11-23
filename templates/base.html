@@ -29,6 +29,7 @@
     <symbol id="i-alert" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></symbol>
     <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></symbol>
     <symbol id="i-percent" viewBox="0 0 24 24"><line x1="19" y1="5" x2="5" y2="19"/><circle cx="6.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></symbol>
     <symbol id="i-award" viewBox="0 0 24 24"><circle cx="12" cy="8" r="7"/><polyline points="8.21 13.89 7 23 12 20 17 23 15.79 13.88"/></symbol>
     <symbol id="i-x" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></symbol>
     <symbol id="i-edit" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></symbol>
@@ -84,6 +85,11 @@
     <header class="topbar">
       <button class="menu-btn" id="menu-btn" type="button" aria-label="Menu"><svg class="i"><use href="#i-menu"/></svg></button>
       <div class="ttl">{{ g.cfg.company_name }} &nbsp;/&nbsp; <b>{{ self.title() }}</b></div>
+      <form class="gsearch" id="gsearch" action="{{ url_for('search_page') }}" method="get" role="search" data-url="{{ url_for('api_search') }}" autocomplete="off">
+        <svg class="i"><use href="#i-search"/></svg>
+        <input type="search" name="q" id="gs-input" placeholder="Search prospects, clients, reps…" aria-label="Search" role="combobox" aria-expanded="false" aria-controls="gs-list" aria-autocomplete="list" maxlength="60">
+        <ul id="gs-list" class="gs-list" role="listbox" hidden></ul>
+      </form>
       <a class="btn alt sm" href="{{ url_for('record_new', type='client') }}"><svg class="i" style="width:15px;height:15px"><use href="#i-plus"/></svg>Client</a>
       <a class="btn sm" href="{{ url_for('record_new', type='prospect') }}"><svg class="i" style="width:15px;height:15px"><use href="#i-plus"/></svg>Prospect</a>
     </header>
