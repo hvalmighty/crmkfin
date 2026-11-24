@@ -803,5 +803,50 @@ _r = sc.post("/commission/import", data={"_csrf": token(sc, "/records"), "file":
 check("commission import blocked for non-admin", _r.status_code in (302, 403) and crm.connect().execute("SELECT COUNT(*) FROM billings").fetchone()[0] == cnt)
 check("import audit-logged", crm.connect().execute("SELECT COUNT(*) FROM audit_log WHERE action='billing_import'").fetchone()[0] >= 3)
 
+# 26. presales commission split between several people
+cid2 = crm.connect().execute("SELECT id FROM records WHERE company='Bulk One'").fetchone()[0]
+cdb = crm.connect(); cdb.execute("UPDATE records SET presales_lead='Lead P' WHERE id=?", (cid2,)); cdb.commit()
+check("allocate adds up exactly", round(sum(a for _, a in crm.allocate(100.01, [("a", 33.33), ("b", 33.33), ("c", 33.34)])), 2) == 100.01)
+check("split parser", crm.parse_split_text("Priya 60%, Rahul:40") == (["Priya", "Rahul"], ["60", "40"]) and crm.parse_split_text("Solo") == (["Solo"], [""]))
+check("single person defaults to 100", crm.parse_presales_split(["Solo", ""], ["", ""]) == ([("Solo", 100.0)], []))
+check("split must total 100", "100%" in crm.parse_presales_split(["A", "B"], ["60", "30"])[1][0])
+check("duplicate person rejected", "twice" in crm.parse_presales_split(["A", "a"], ["50", "50"])[1][0])
+check("name without pct rejected for several people", crm.parse_presales_split(["A", "B"], ["", "50"])[1] != [])
+t = token(path="/commission/new")
+base = {"_csrf": t, "record_id": str(cid2), "invoice_ref": "PS-1", "currency": "INR", "billed_amount": "1000000", "billed_date": "2026-05-01",
+        "collected_amount": "1000000", "collected_date": "2026-06-01", "commission_pct": "10"}
+r = c.post("/commission/new", data=dict(base, ps_name=["Priya", "Rahul", "", "", "", ""], ps_pct=["60", "30", "", "", "", ""]), follow_redirects=True)
+check("bad split blocks save", b"add up to 90%" in r.data and crm.connect().execute("SELECT COUNT(*) FROM billings WHERE invoice_ref='PS-1'").fetchone()[0] == 0)
+check("form keeps typed split on error", b'value="Priya"' in r.data and b'value="60"' in r.data)
+r = c.post("/commission/new", data=dict(base, ps_name=["Priya", "Rahul", "", "", "", ""], ps_pct=["60", "40", "", "", "", ""]), follow_redirects=True)
+check("split billing saved", b"Billing saved" in r.data and b"Priya" in r.data and b"Rahul" in r.data, re.sub(rb"<[^>]+>", b" ", r.data)[:200])
+d = crm.commission_data(crm.connect(), crm.get_settings(crm.connect()), 0, 0, "collected")
+pp = {(p["role"], p["name"]): p["share"] for p in d["people"] if p["cur"] == "INR"}
+ln = [l for l in d["lines"] if l["invoice_ref"] == "PS-1"][0]
+check("presales pool shared 60/40", ln["presales"] == 40000 and ln["ps_shares"] == [("Priya", 24000.0), ("Rahul", 16000.0)], ln["ps_shares"])   # split was set to 40/40/20 earlier
+check("people table includes the split", pp[("Presales", "Priya")] >= 24000 and pp[("Presales", "Rahul")] >= 16000, pp)
+check("lead not credited when split given", ("Presales", "Lead P") not in pp or pp[("Presales", "Lead P")] != 30000)
+check("sales share unchanged", pp[("Sales", "Asha")] >= 50000)
+pid = crm.connect().execute("SELECT id FROM billings WHERE invoice_ref='PS-1'").fetchone()[0]
+check("edit form shows split", b'value="Rahul"' in c.get(f"/commission/{pid}/edit").data)
+t2 = token(path=f"/commission/{pid}/edit")
+r = c.post(f"/commission/{pid}/edit", data=dict(base, _csrf=t2, ps_name=["Priya", "", "", "", "", ""], ps_pct=["100", "", "", "", "", ""]), follow_redirects=True)
+check("edit replaces split", crm.connect().execute("SELECT COUNT(*) FROM billing_presales WHERE billing_id=?", (pid,)).fetchone()[0] == 1)
+r = c.post(f"/commission/{pid}/edit", data=dict(base, _csrf=t2, ps_name=["", "", "", "", "", ""], ps_pct=["", "", "", "", "", ""]), follow_redirects=True)
+d = crm.commission_data(crm.connect(), crm.get_settings(crm.connect()), 0, 0, "collected")
+check("no split -> presales lead gets it all", any(p["role"] == "Presales" and p["name"] == "Lead P" and p["share"] >= 40000 for p in d["people"]))
+# import with a split column + export round trip
+bio = bxl([["Bulk One", "PS-2", "INR", 100000, "01-05-2026", 100000, "01-06-2026", 10, "", "Priya 70%, Rahul 30%"],
+           ["Bulk One", "PS-3", "INR", 100000, "01-05-2026", 100000, "01-06-2026", 10, "", "Priya 70%, Rahul 20%"]],
+          heads=["Client*", "Invoice", "Currency", "Billed Amount*", "Billed Date*", "Collected Amount", "Collected Date", "Commission %", "Notes", "Presales Split"])
+r = bimp(bio); check("import with presales split", b"<strong>1</strong> added" in r.data and b"add up to 90%" in r.data, re.sub(rb"<[^>]+>", b" ", r.data)[-400:])
+sp = crm.load_presales(crm.connect(), crm.connect().execute("SELECT id FROM billings WHERE invoice_ref='PS-2'").fetchone()[0])
+check("imported split stored", list(sp.values())[0] == [("Priya", 70.0), ("Rahul", 30.0)], sp)
+ex = c.get("/commission/export.xlsx").data; wsx = load_workbook(io.BytesIO(ex))["Commission"]
+check("export carries the split", "Priya 70%, Rahul 30%" in [x.value for x in wsx["J"]], [x.value for x in wsx["J"]])
+r = bimp(io.BytesIO(ex)); check("round trip keeps split", b"<strong>0</strong> row problem" in r.data and list(crm.load_presales(crm.connect(), crm.connect().execute("SELECT id FROM billings WHERE invoice_ref='PS-2'").fetchone()[0]).values())[0] == [("Priya", 70.0), ("Rahul", 30.0)])
+c.post(f"/commission/{pid}/delete", data={"_csrf": token(path="/commission")})
+check("deleting a line deletes its split rows", crm.connect().execute("SELECT COUNT(*) FROM billing_presales WHERE billing_id=?", (pid,)).fetchone()[0] == 0)
+
 print("backend:", "PostgreSQL" if crm.USE_PG else "SQLite")
 print("\nFAILED:" if fails else "\nALL PASSED", fails)

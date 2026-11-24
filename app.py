@@ -153,6 +153,12 @@ def schema_statements():
             notes TEXT,
             created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""",
         "CREATE INDEX IF NOT EXISTS idx_billings_record ON billings (record_id)",
+        f"""CREATE TABLE IF NOT EXISTS billing_presales (
+            id {pk},
+            billing_id INTEGER NOT NULL,
+            person TEXT NOT NULL,
+            share_pct {real} NOT NULL)""",
+        "CREATE INDEX IF NOT EXISTS idx_bps_billing ON billing_presales (billing_id)",
         f"""CREATE TABLE IF NOT EXISTS audit_log (
             id {pk},
             ts TEXT NOT NULL, username TEXT, action TEXT NOT NULL, detail TEXT)""",
@@ -377,7 +383,7 @@ def migrate(conn):
 
 
 # Bump this whenever the schema / migrations / seed data change, so existing databases get upgraded once.
-SCHEMA_VERSION = "2026-11-24.1"
+SCHEMA_VERSION = "2026-11-24.2"
 
 
 def schema_is_current():
@@ -1868,6 +1874,7 @@ def record_delete(rid):
     rec = g.db.execute("SELECT type, company FROM records WHERE id=?", (rid,)).fetchone()
     if not rec:
         abort(404)
+    g.db.execute("DELETE FROM billing_presales WHERE billing_id IN (SELECT id FROM billings WHERE record_id=?)", (rid,))
     g.db.execute("DELETE FROM billings WHERE record_id=?", (rid,))
     g.db.execute("DELETE FROM records WHERE id=?", (rid,))
     audit(g.db, g.user["username"], "record_deleted", f"#{rid} {rec['company']}")
@@ -2419,6 +2426,77 @@ def commission_calc(billed, collected, pct, split):
             "outstanding": round(max((billed or 0) - (collected or 0), 0), 2)}
 
 
+
+MAX_PRESALES_PEOPLE = 6
+
+
+def allocate(amount, shares):
+    """Split an amount over [(name, pct)]; rounding to paise, the last person absorbs the remainder so the parts add up exactly."""
+    out, used = [], 0.0
+    for i, (name, pct) in enumerate(shares):
+        part = round(amount - used, 2) if i == len(shares) - 1 else round(amount * pct / 100, 2)
+        out.append((name, part)); used += part
+    return out
+
+
+def parse_presales_split(names, pcts):
+    """Form rows -> ([(name, pct)], errors). Empty rows are ignored; if any person is given the shares must add up to 100."""
+    rows, errs, seen = [], [], set()
+    for nm, pc in zip(names, pcts):
+        nm = clean_text(nm or "", 80); pc = str(pc or "").strip()
+        if not nm and not pc:
+            continue
+        if not nm:
+            errs.append("Presales split: a percentage has no person name."); continue
+        if nm.lower() in seen:
+            errs.append(f"Presales split: {nm} appears twice."); continue
+        seen.add(nm.lower())
+        try:
+            v = parse_money(pc) if pc else (100.0 if len(names) and sum(1 for x in names if (x or "").strip()) == 1 else None)
+        except ValueError:
+            v = None
+        if v is None or v <= 0 or v > 100:
+            errs.append(f"Presales split: enter a percentage between 0 and 100 for {nm}."); continue
+        rows.append((nm, v))
+    if len(rows) > MAX_PRESALES_PEOPLE:
+        errs.append(f"Presales split: at most {MAX_PRESALES_PEOPLE} people per billing line.")
+    if rows and not errs and abs(sum(p for _, p in rows) - 100) > 0.01:
+        errs.append(f"Presales split: the shares add up to {sum(p for _, p in rows):g}%, they must add up to 100%.")
+    return rows, errs
+
+
+def parse_split_text(text):
+    """'Priya 60%, Rahul 40%' / 'Priya:60; Rahul:40' / 'Priya' -> ([names], [pcts]) for parse_presales_split."""
+    toks = [t.strip() for t in re.split(r"[;,\n]", str(text or "")) if t.strip()]
+    names, pcts = [], []
+    for t in toks:
+        m = re.match(r"^(.*?)[\s:=\-]*([\d.]+)\s*%?$", t)
+        if m and m.group(1).strip():
+            names.append(m.group(1).strip()); pcts.append(m.group(2))
+        else:
+            names.append(t); pcts.append("")
+    return names, pcts
+
+
+def split_text(shares):
+    return ", ".join(f"{n} {p:g}%" for n, p in shares)
+
+
+def load_presales(conn, bid=None):
+    """{billing_id: [(name, pct)]} for one line or all lines."""
+    q = "SELECT billing_id, person, share_pct FROM billing_presales" + (" WHERE billing_id=?" if bid else "") + " ORDER BY id"
+    out = {}
+    for r in conn.execute(q, (bid,) if bid else ()).fetchall():
+        out.setdefault(r["billing_id"], []).append((r["person"], r["share_pct"]))
+    return out
+
+
+def save_presales(conn, bid, shares):
+    conn.execute("DELETE FROM billing_presales WHERE billing_id=?", (bid,))
+    for nm, pc in shares:
+        conn.execute("INSERT INTO billing_presales(billing_id, person, share_pct) VALUES(?,?,?)", (bid, nm, pc))
+
+
 def money2(v, cur):
     v = float(v or 0)
     whole, frac = f"{abs(v):.2f}".split(".")
@@ -2450,20 +2528,26 @@ def commission_data(conn, cfg, fy, quarter, by):
         "SELECT b.*, r.company, r.owner, r.presales_lead FROM billings b JOIN records r ON r.id = b.record_id "
         + ("WHERE " + " AND ".join(where) if where else "") + " ORDER BY COALESCE(b.collected_date, b.billed_date) DESC, b.id DESC", args).fetchall()
     lines = []
+    all_ps = load_presales(conn)
     tot = {c: dict(billed=0.0, collected=0.0, outstanding=0.0, due=0.0, pending=0.0, sales=0.0, presales=0.0, mgmt=0.0) for c in ("INR", "USD")}
     people = {}
     for r in rows:
         c = commission_calc(r["billed_amount"], r["collected_amount"], r["commission_pct"], split)
         cur = r["currency"] if r["currency"] in tot else "INR"
-        d = dict(r); d.update(c); d["cur"] = cur; lines.append(d)
+        d = dict(r); d.update(c); d["cur"] = cur
+        explicit = all_ps.get(r["id"])
+        shares = explicit or [((r["presales_lead"] or "").strip() or "(not assigned)", 100.0)]
+        d["ps_shares"] = allocate(c["presales"], shares); d["ps_explicit"] = bool(explicit); d["ps_split"] = explicit or []
+        lines.append(d)
         t = tot[cur]
         t["billed"] += r["billed_amount"] or 0; t["collected"] += r["collected_amount"] or 0
         for k in ("outstanding", "due", "pending", "sales", "presales", "mgmt"):
             t[k] += c[k]
-        for role, name, amt in (("Sales", r["owner"], c["sales"]), ("Presales", r["presales_lead"], c["presales"])):
+        credits = [("Sales", r["owner"], c["sales"], 100.0)] + [("Presales", nm, amt, pct) for (nm, amt), (_, pct) in zip(d["ps_shares"], shares)]
+        for role, name, amt, pct in credits:
             key = (role, (name or "").strip().lower(), cur)
             p = people.setdefault(key, {"role": role, "name": (name or "").strip() or "(not assigned)", "cur": cur, "collected": 0.0, "share": 0.0, "n": 0})
-            p["collected"] += r["collected_amount"] or 0; p["share"] += amt; p["n"] += 1
+            p["collected"] += (r["collected_amount"] or 0) * pct / 100; p["share"] += amt; p["n"] += 1
     ppl = sorted(people.values(), key=lambda p: (p["role"] != "Sales", p["cur"], -p["share"]))
     return {"lines": lines, "tot": tot, "people": ppl, "split": split, "lo": lo, "hi": hi}
 
@@ -2558,9 +2642,17 @@ def commission_settings():
     return redirect(url_for("commission"))
 
 
-def billing_form_ctx(row, errors=None):
+def billing_form_ctx(row, errors=None, ps=None):
     clients = g.db.execute("SELECT id, company, owner, presales_lead FROM records WHERE type='client' ORDER BY lower(company)").fetchall()
-    return dict(b=row, clients=clients, errors=errors or [], split=commission_split(g.cfg))
+    people = [r[0] for r in g.db.execute("SELECT DISTINCT presales_lead FROM records WHERE presales_lead IS NOT NULL AND presales_lead != '' "
+                                         "ORDER BY presales_lead").fetchall()]
+    rows = [{"name": n, "pct": p if isinstance(p, str) else f"{p:g}"} for n, p in (ps or [])]
+    rows += [{"name": "", "pct": ""}] * max(MAX_PRESALES_PEOPLE - len(rows), 0)
+    return dict(b=row, clients=clients, errors=errors or [], split=commission_split(g.cfg), ps_rows=rows, ps_people=people)
+
+
+def ps_from_form():
+    return [(n, p) for n, p in zip(request.form.getlist("ps_name"), request.form.getlist("ps_pct")) if (n or "").strip() or (p or "").strip()]
 
 
 @app.route("/commission/new", methods=["GET", "POST"])
@@ -2568,21 +2660,24 @@ def billing_form_ctx(row, errors=None):
 def billing_new():
     if request.method == "POST":
         d, errs = parse_billing_form(request.form)
+        ps, pe = parse_presales_split(request.form.getlist("ps_name"), request.form.getlist("ps_pct")); errs += pe
         if d["record_id"] and not g.db.execute("SELECT 1 FROM records WHERE id=? AND type='client'", (d["record_id"],)).fetchone():
             errs.append("Commission is entered against a converted client.")
         if not errs:
             now = iso(utcnow())
-            g.db.execute("INSERT INTO billings(record_id,invoice_ref,currency,billed_amount,billed_date,collected_amount,collected_date,"
-                         "commission_pct,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            bid_new = g.db.execute("INSERT INTO billings(record_id,invoice_ref,currency,billed_amount,billed_date,collected_amount,collected_date,"
+                         "commission_pct,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) RETURNING id",
                          (d["record_id"], d["invoice_ref"], d["currency"], d["billed_amount"], d["billed_date"], d["collected_amount"],
-                          d["collected_date"], d["commission_pct"], d["notes"], now, now))
+                          d["collected_date"], d["commission_pct"], d["notes"], now, now)).fetchone()[0]
+            save_presales(g.db, bid_new, ps)
             audit(g.db, g.user["username"], "billing_added", f"client #{d['record_id']} {d['currency']} billed {d['billed_amount']:g} collected {d['collected_amount']:g}")
             g.db.commit()
             flash("Billing saved.", "ok")
             return redirect(url_for("commission"))
-        return render_template("billing_form.html", is_new=True, **billing_form_ctx(request.form, errs))
+        return render_template("billing_form.html", is_new=True, **billing_form_ctx(request.form, errs, ps_from_form()))
     pre = {"record_id": request.args.get("record", ""), "commission_pct": g.cfg["commission_default_pct"], "currency": "INR"}
-    return render_template("billing_form.html", is_new=True, **billing_form_ctx(pre))
+    lead = g.db.execute("SELECT presales_lead FROM records WHERE id=? AND type='client'", (pre["record_id"],)).fetchone() if str(pre["record_id"]).isdigit() else None
+    return render_template("billing_form.html", is_new=True, **billing_form_ctx(pre, None, [(lead[0], 100.0)] if lead and lead[0] else None))
 
 
 @app.route("/commission/<int:bid>/edit", methods=["GET", "POST"])
@@ -2593,23 +2688,26 @@ def billing_edit(bid):
         abort(404)
     if request.method == "POST":
         d, errs = parse_billing_form(request.form)
+        ps, pe = parse_presales_split(request.form.getlist("ps_name"), request.form.getlist("ps_pct")); errs += pe
         if not errs:
             g.db.execute("UPDATE billings SET record_id=?, invoice_ref=?, currency=?, billed_amount=?, billed_date=?, collected_amount=?, "
                          "collected_date=?, commission_pct=?, notes=?, updated_at=? WHERE id=?",
                          (d["record_id"], d["invoice_ref"], d["currency"], d["billed_amount"], d["billed_date"], d["collected_amount"],
                           d["collected_date"], d["commission_pct"], d["notes"], iso(utcnow()), bid))
+            save_presales(g.db, bid, ps)
             audit(g.db, g.user["username"], "billing_updated", f"#{bid} client #{d['record_id']} collected {d['collected_amount']:g}")
             g.db.commit()
             flash("Billing updated.", "ok")
             return redirect(url_for("commission"))
-        return render_template("billing_form.html", is_new=False, bid=bid, **billing_form_ctx(request.form, errs))
-    return render_template("billing_form.html", is_new=False, bid=bid, **billing_form_ctx(dict(row)))
+        return render_template("billing_form.html", is_new=False, bid=bid, **billing_form_ctx(request.form, errs, ps_from_form()))
+    return render_template("billing_form.html", is_new=False, bid=bid, **billing_form_ctx(dict(row), None, load_presales(g.db, bid).get(bid)))
 
 
 @app.route("/commission/<int:bid>/delete", methods=["POST"])
 @admin_required
 def billing_delete(bid):
     if g.db.execute("SELECT 1 FROM billings WHERE id=?", (bid,)).fetchone():
+        g.db.execute("DELETE FROM billing_presales WHERE billing_id=?", (bid,))
         g.db.execute("DELETE FROM billings WHERE id=?", (bid,))
         audit(g.db, g.user["username"], "billing_deleted", f"#{bid}")
         g.db.commit()
@@ -2628,16 +2726,16 @@ def commission_export():
                                  "Commission due (on collected)", "Commission pending (on outstanding)", "Sales owner", "Presales lead"])
     for l in d["lines"]:
         ws.append([l["company"], l["invoice_ref"], l["cur"], l["billed_amount"], l["billed_date"], l["collected_amount"], l["collected_date"],
-                   l["commission_pct"], l["notes"], l["outstanding"], l["sales"], l["presales"], l["mgmt"], l["due"], l["pending"],
+                   l["commission_pct"], l["notes"], split_text(l["ps_split"]), l["outstanding"], l["sales"], l["presales"], l["mgmt"], l["due"], l["pending"],
                    l["owner"], l["presales_lead"]])
-    style_header(ws, [28, 14, 9, 16, 13, 16, 14, 12, 24, 14, 14, 14, 16, 18, 20, 20, 20])
+    style_header(ws, [28, 14, 9, 16, 13, 16, 14, 12, 24, 26, 14, 14, 14, 16, 18, 20, 20, 20])
     bio = io.BytesIO(); wb.save(bio); bio.seek(0)
     return send_file(bio, as_attachment=True, download_name="commission.xlsx",
                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
 # ---- commission bulk import / template
-BILLING_HEADERS = ["Client*", "Invoice", "Currency", "Billed Amount*", "Billed Date*", "Collected Amount", "Collected Date", "Commission %", "Notes"]
+BILLING_HEADERS = ["Client*", "Invoice", "Currency", "Billed Amount*", "Billed Date*", "Collected Amount", "Collected Date", "Commission %", "Notes", "Presales Split"]
 BILLING_ALIASES = {
     "client": "client", "clientname": "client", "company": "client", "customer": "client",
     "invoice": "invoice", "invoiceno": "invoice", "invoicenumber": "invoice", "invoiceref": "invoice", "reference": "invoice", "ref": "invoice",
@@ -2648,6 +2746,7 @@ BILLING_ALIASES = {
     "collecteddate": "collected_date", "receiveddate": "collected_date", "collectiondate": "collected_date",
     "commission": "pct", "commissionpct": "pct", "commissionpercent": "pct", "commissionrate": "pct", "rate": "pct", "pct": "pct",
     "notes": "notes", "note": "notes", "remarks": "notes",
+    "presalessplit": "ps", "presales": "ps", "presalesshare": "ps", "presalessharing": "ps", "split": "ps",
 }
 
 
@@ -2710,6 +2809,9 @@ def import_billings(conn, stream, default_pct, dry):
                 "commission_pct": default_pct if pct in (None, "") else pct, "notes": get("notes")}
         form = {k: (v if isinstance(v, (datetime, date)) or v is None else str(v) if k != "commission_pct" else v) for k, v in form.items()}
         d, errs = parse_billing_form(form)
+        ps_txt = get("ps"); ps = None
+        if str(ps_txt or "").strip():
+            ps, pe = parse_presales_split(*parse_split_text(ps_txt)); errs += pe
         if errs:
             res["errors"].append((n, "; ".join(errs))); continue
         res["rows"] += 1
@@ -2727,6 +2829,8 @@ def import_billings(conn, stream, default_pct, dry):
                                 "record_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) RETURNING id", vals + (d["record_id"], now, now))
             bid = cur_.fetchone()[0]
             res["created"] += 1
+        if ps:
+            save_presales(conn, bid, ps)         # a blank Presales Split cell leaves an existing split untouched
         if key:
             existing[key] = bid
         existing[akey] = bid
@@ -2740,10 +2844,10 @@ def billing_template():
     ws.append(BILLING_HEADERS)
     ex = g.db.execute("SELECT company FROM records WHERE type='client' ORDER BY lower(company) LIMIT 2").fetchall()
     c1 = ex[0]["company"] if ex else "Example Client Ltd"
-    ws.append([c1, "INV-1001", "INR", 1000000, "01-05-2026", 400000, "10-06-2026", g.cfg["commission_default_pct"], "first instalment"])
-    ws.append([c1, "INV-1002", "INR", 500000, "01-07-2026", None, None, g.cfg["commission_default_pct"], "not collected yet"])
-    ws.append([ex[1]["company"] if len(ex) > 1 else "Another Client", "", "USD", 12000, "15-07-2026", 12000, "30-07-2026", g.cfg["commission_default_pct"], ""])
-    style_header(ws, [30, 14, 10, 16, 14, 17, 15, 14, 28])
+    ws.append([c1, "INV-1001", "INR", 1000000, "01-05-2026", 400000, "10-06-2026", g.cfg["commission_default_pct"], "first instalment", "Priya 60%, Rahul 40%"])
+    ws.append([c1, "INV-1002", "INR", 500000, "01-07-2026", None, None, g.cfg["commission_default_pct"], "not collected yet", ""])
+    ws.append([ex[1]["company"] if len(ex) > 1 else "Another Client", "", "USD", 12000, "15-07-2026", 12000, "30-07-2026", g.cfg["commission_default_pct"], "", ""])
+    style_header(ws, [30, 14, 10, 16, 14, 17, 15, 14, 28, 30])
     w2 = wb.create_sheet("Clients")
     w2.append(["Client names you can use (exactly as written)", "Sales owner", "Presales lead"])
     for r in g.db.execute("SELECT company, owner, presales_lead FROM records WHERE type='client' ORDER BY lower(company)"):
@@ -2755,6 +2859,7 @@ def billing_template():
                  "Dates as DD-MM-YYYY. Collected Amount and Collected Date go together; leave both empty if nothing is collected yet.",
                  "Commission % is the rate applied to the COLLECTED amount; leave it empty to use the default (" + str(g.cfg["commission_default_pct"]) + "%).",
                  "Re-uploading updates existing lines (matched on Client + Invoice, or Client + billed date + amount when there is no invoice), so you can upload collections as they come in.",
+                 "Presales Split (optional): share the presales commission between several people, e.g. 'Priya 60%, Rahul 40%'. Must add up to 100. Empty = the client's presales lead gets all of it.",
                  "Use 'Dry run' on the upload screen to check the file without saving."):
         w3.append([line])
     w3.column_dimensions["A"].width = 150
@@ -2997,6 +3102,8 @@ def danger_zone():
         else:
             kinds = DELETE_SCOPES[scope]
             n = sum(counts()["prospects" if k == "prospect" else "clients"] for k in kinds)
+            g.db.execute(f"DELETE FROM billing_presales WHERE billing_id IN (SELECT id FROM billings WHERE record_id IN "
+                         f"(SELECT id FROM records WHERE type IN ({','.join('?' * len(kinds))})))", kinds)
             g.db.execute(f"DELETE FROM billings WHERE record_id IN (SELECT id FROM records WHERE type IN ({','.join('?' * len(kinds))}))", kinds)
             g.db.execute(f"DELETE FROM records WHERE type IN ({','.join('?' * len(kinds))})", kinds)
             audit(g.db, g.user["username"], "delete_data", f"scope={scope}: {n} record(s) deleted")

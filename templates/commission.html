@@ -50,7 +50,8 @@
     <td class="r">{{ money2(l.billed_amount, l.cur) }}<br><span class="muted">{{ l.billed_date|fdate }}</span></td>
     <td class="r">{{ money2(l.collected_amount, l.cur) }}<br><span class="muted">{{ l.collected_date|fdate if l.collected_date else '–' }}</span></td>
     <td class="r">{{ money2(l.outstanding, l.cur) }}</td><td class="r">{{ '%g' % l.commission_pct }}%</td>
-    <td class="r"><strong>{{ money2(l.due, l.cur) }}</strong><br><span class="muted">S {{ money2(l.sales, l.cur) }} · P {{ money2(l.presales, l.cur) }} · M {{ money2(l.mgmt, l.cur) }}</span></td>
+    <td class="r"><strong>{{ money2(l.due, l.cur) }}</strong><br><span class="muted">S {{ money2(l.sales, l.cur) }} · P {{ money2(l.presales, l.cur) }} · M {{ money2(l.mgmt, l.cur) }}</span>
+      {% if l.ps_shares | length > 1 %}<br><span class="muted">Presales: {% for n, a in l.ps_shares %}{{ n }} {{ money2(a, l.cur) }}{{ ' · ' if not loop.last }}{% endfor %}</span>{% endif %}</td>
     <td><a class="btn alt sm" href="{{ url_for('billing_edit', bid=l.id) }}">Edit</a></td>
   </tr>
   {% else %}<tr><td colspan="8" class="empty">No billing lines for this period. <a href="{{ url_for('billing_new') }}">Add the first one</a>.</td></tr>{% endfor %}

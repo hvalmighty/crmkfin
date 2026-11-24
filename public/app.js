@@ -249,3 +249,23 @@ document.addEventListener("submit", function (e) {
     sf.addEventListener("input", upd); upd();
   }
 })();
+
+
+// Billing form: presales split rows - running total, and pre-fill the client's presales lead.
+(function () {
+  var t = document.getElementById("ps-table"), f = document.getElementById("bill-form");
+  if (!t || !f) return;
+  var rows = Array.prototype.slice.call(t.querySelectorAll("tr")), out = document.getElementById("ps-sum");
+  function num(v) { v = parseFloat(String(v || "").replace(/[^\d.]/g, "")); return isNaN(v) ? 0 : v; }
+  function upd() {
+    var tot = 0, n = 0;
+    rows.forEach(function (r) { var i = r.querySelectorAll("input"); if (i[0].value.trim() || i[1].value.trim()) { n++; tot += num(i[1].value); } });
+    out.textContent = n ? "Presales shares total " + (Math.round(tot * 100) / 100) + "%" + (Math.abs(tot - 100) < 0.01 ? " \u2713" : " - must be 100%") : "";
+  }
+  t.addEventListener("input", upd); upd();
+  f.elements.record_id.addEventListener("change", function () {
+    var lead = this.options[this.selectedIndex].getAttribute("data-presales") || "";
+    var empty = rows.every(function (r) { var i = r.querySelectorAll("input"); return !i[0].value.trim() && !i[1].value.trim(); });
+    if (lead && empty) { var i = rows[0].querySelectorAll("input"); i[0].value = lead; i[1].value = "100"; upd(); }
+  });
+})();

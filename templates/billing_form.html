@@ -10,7 +10,7 @@
     <div class="span2"><label for="record_id">Client (deal won) *</label>
       <select id="record_id" name="record_id" required>
         <option value="">– select a client –</option>
-        {% for c in clients %}<option value="{{ c.id }}" {{ 'selected' if b.record_id | string == c.id | string }}>{{ c.company }}{% if c.owner %} · {{ c.owner }}{% endif %}</option>{% endfor %}
+        {% for c in clients %}<option value="{{ c.id }}" data-presales="{{ c.presales_lead or '' }}" {{ 'selected' if b.record_id | string == c.id | string }}>{{ c.company }}{% if c.owner %} · {{ c.owner }}{% endif %}</option>{% endfor %}
       </select>
       {% if not clients %}<div class="hint">There are no clients yet - convert a prospect or add a client first.</div>{% endif %}</div>
     <div><label for="invoice_ref">Invoice / reference</label>
@@ -29,6 +29,13 @@
       <input id="commission_pct" name="commission_pct" type="text" inputmode="decimal" value="{{ b.commission_pct if b.commission_pct is not none else '' }}"></div>
     <div><label>Commission due now</label>
       <div class="calc" id="calc" aria-live="polite">–</div></div>
+    <div class="span2 ps-box"><label>Presales split <span class="muted" style="font-weight:400">- share the presales commission between people (must add up to 100%). Leave empty to give it all to the client's presales lead.</span></label>
+      <datalist id="ps-people">{% for n in ps_people %}<option value="{{ n }}">{% endfor %}</datalist>
+      <table class="ps-t" id="ps-table">
+        {% for r in ps_rows %}<tr><td><input type="text" name="ps_name" list="ps-people" maxlength="80" placeholder="Presales person" value="{{ r.name }}"></td>
+          <td><input type="text" name="ps_pct" inputmode="decimal" maxlength="7" placeholder="%" value="{{ r.pct }}"></td></tr>{% endfor %}
+      </table>
+      <div class="hint" id="ps-sum"></div></div>
     <div class="span2"><label for="notes">Notes</label>
       <textarea id="notes" name="notes" maxlength="500">{{ b.notes or '' }}</textarea></div>
   </div>
