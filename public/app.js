@@ -221,3 +221,31 @@ document.addEventListener("submit", function (e) {
   document.addEventListener("keydown", function (ev) { if (ev.key === "Escape" && !pop.hidden) { pop.hidden = true; btn.focus(); } });
   setTimeout(load, 400);               // after the page is up, so it never delays the first paint
 })();
+
+
+// Commission: live preview on the billing form, and a running total on the split settings.
+(function () {
+  var f = document.getElementById("bill-form");
+  function num(v) { v = parseFloat(String(v || "").replace(/[^\d.]/g, "")); return isNaN(v) ? 0 : v; }
+  if (f) {
+    var out = document.getElementById("calc");
+    var r2 = function (x) { return Math.round(x * 100) / 100; };
+    var show = function () {
+      var sym = f.elements.currency.value === "USD" ? "$" : "\u20b9", loc = f.elements.currency.value === "USD" ? "en-US" : "en-IN";
+      var fmt = function (x) { return sym + x.toLocaleString(loc, { minimumFractionDigits: 0, maximumFractionDigits: 2 }); };
+      var due = r2(num(f.elements.collected_amount.value) * num(f.elements.commission_pct.value) / 100);
+      var s = r2(due * parseFloat(f.dataset.sales) / 100), p = r2(due * parseFloat(f.dataset.pre) / 100), m = r2(due - s - p);
+      out.textContent = due ? fmt(due) + "  =  sales " + fmt(s) + " \u00b7 presales " + fmt(p) + " \u00b7 mgmt " + fmt(m) : "\u2013";
+    };
+    f.addEventListener("input", show); f.addEventListener("change", show); show();
+  }
+  var sf = document.getElementById("split-form");
+  if (sf) {
+    var sum = document.getElementById("split-sum");
+    var upd = function () {
+      var t = num(document.getElementById("split_sales").value) + num(document.getElementById("split_presales").value) + num(document.getElementById("split_mgmt").value);
+      sum.textContent = "Total " + (Math.round(t * 100) / 100) + "%" + (Math.abs(t - 100) < 0.01 ? " \u2713" : " - must be 100%");
+    };
+    sf.addEventListener("input", upd); upd();
+  }
+})();

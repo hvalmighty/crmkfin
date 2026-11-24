@@ -98,6 +98,12 @@ TEST_DATABASE_URL=postgresql://user@host/emptydb python tests/smoke_test.py   # 
 - In an Excel import, a product that is not in the master yet is added to it automatically (spelling is matched case-insensitively to the master). Columns: `Product`, `Product / Service` (placed after Region / Country in the template).
 - Analytics: pipeline by product, product vs service, closed-won by product, win rate by product, and a product scorecard; Reports has the same by product / product vs service.
 
+## Commission
+Admin → **Commission**. For each won deal (client) add one or more **billing lines**: invoice reference, currency, billed amount + date, collected amount + date and the commission %.
+- **Commission due = collected amount × commission %.** What is still outstanding shows as *commission pending* (outstanding × %).
+- The pool is split **Sales 50% · Presales 30% · Management 20%** by default. Change it on the same page (the three must add up to 100%); a change re-prices all lines. Sales goes to the client's *Sales owner*, presales to the *Presales lead*; management is a pool. The management share absorbs rounding so the shares always add up exactly.
+- View by collected date (default) or billed date, for all time, a financial year or a quarter; totals per person; Excel export. INR and USD are never mixed. Deleting a client removes its billing lines. Everything is audit-logged.
+
 ## Notification bell
 The bell in the top bar shows how many open prospects are **overdue** (expected closure date passed) or **closing in the next 30 days**; the badge is red when something is overdue. Click it for the list (most overdue first), click a name to open the record, or "View all" for the filtered prospect list. Lost prospects are excluded.
 

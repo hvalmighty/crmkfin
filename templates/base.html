@@ -58,6 +58,7 @@
       <a href="{{ url_for('records', type='client') }}" class="{{ 'on' if rec_ep and request.values.get('type') == 'client' }}" title="Clients"><svg class="i"><use href="#i-check"/></svg><span class="lbl">Clients</span></a>
       <div class="nav-h">Data</div>
       <a href="{{ url_for('reports') }}" class="{{ 'on' if ep == 'reports' }}" title="Reports"><svg class="i"><use href="#i-file"/></svg><span class="lbl">Reports</span></a>
+      {% if g.user.role == 'admin' %}<a href="{{ url_for('commission') }}" class="{{ 'on' if ep in ('commission','billing_new','billing_edit') }}" title="Commission"><svg class="i"><use href="#i-percent"/></svg><span class="lbl">Commission</span></a>{% endif %}
       <a href="{{ url_for('data_page') }}" class="{{ 'on' if ep == 'data_page' }}" title="Import / Export"><svg class="i"><use href="#i-cloud"/></svg><span class="lbl">Import / Export</span></a>
       {% if g.user.role == 'admin' %}
       <div class="nav-h">Admin</div>

@@ -683,5 +683,68 @@ check("overdue list filter", b"BellOver" in ov and b"BellSoon" not in ov and b"B
 check("30-day list filter", b"BellSoon" in so and b"BellOver" not in so and b"BellFar" not in so)
 check("bad due value ignored", c.get("/records?type=prospect&due=zz").status_code == 200)
 
+# 24. commission (billed vs collected)
+cdb = crm.connect()
+cid = cdb.execute("SELECT id FROM records WHERE company='Zephyr Capital'").fetchone()[0]
+cdb.execute("UPDATE records SET presales_lead='Priya' WHERE id=?", (cid,)); cdb.commit()
+check("commission page", c.get("/commission").status_code == 200 and b"Commission split" in c.get("/commission").data)
+check("billing form", c.get(f"/commission/new?record={cid}").status_code == 200)
+for pth in ("/commission", "/commission/new", "/commission/export.xlsx", "/commission/1/edit"):
+    check(f"commission blocked for non-admin {pth}", sc.get(pth).status_code in (302, 403))
+bill = {"record_id": str(cid), "invoice_ref": "INV-1", "currency": "INR", "billed_amount": "10,00,000", "billed_date": "2026-05-01",
+        "collected_amount": "400000", "collected_date": "2026-06-10", "commission_pct": "5"}
+t = token(path="/commission/new")
+r = c.post("/commission/new", data=dict(bill, _csrf=t), follow_redirects=True); check("billing saved", b"Billing saved" in r.data, r.data[:200])
+r = c.post("/commission/new", data=dict(bill, _csrf=t, invoice_ref="INV-2", currency="USD", billed_amount="1000", collected_amount="333.33", commission_pct="7.5",
+                                       collected_date="2026-07-02", billed_date="2026-06-20"), follow_redirects=True)
+check("usd billing saved", b"Billing saved" in r.data)
+cm = crm.commission_calc(1000000, 400000, 5, (50.0, 30.0, 20.0))
+check("commission on collected", cm["due"] == 20000 and cm["sales"] == 10000 and cm["presales"] == 6000 and cm["mgmt"] == 4000, cm)
+check("commission pending on outstanding", cm["pending"] == 30000 and cm["outstanding"] == 600000)
+cm = crm.commission_calc(1000, 333.33, 7.5, (50.0, 30.0, 20.0))
+check("split always adds up to the pool", round(cm["sales"] + cm["presales"] + cm["mgmt"], 2) == cm["due"], cm)
+d = crm.commission_data(crm.connect(), crm.get_settings(crm.connect()), 0, 0, "collected")
+check("totals per currency, never mixed", d["tot"]["INR"]["collected"] == 400000 and d["tot"]["USD"]["collected"] == 333.33 and d["tot"]["INR"]["due"] == 20000, d["tot"])
+pp = {(p["role"], p["name"], p["cur"]): p for p in d["people"]}
+check("sales rep and presales lead credited", pp[("Sales", "Kavita", "INR")]["share"] == 10000 and pp[("Presales", "Priya", "INR")]["share"] == 6000, list(pp))
+# period filters: FY starts April in this test -> collected 2026-06-10 is FY2026 Q1, 2026-07-02 is Q2
+q1 = crm.commission_data(crm.connect(), crm.get_settings(crm.connect()), 2026, 1, "collected")
+check("quarter filter by collected date", q1["tot"]["INR"]["collected"] == 400000 and q1["tot"]["USD"]["collected"] == 0, q1["tot"])
+check("period range", crm.period_range({"fy_start_month": "4"}, 2026, 4) == ("2027-01-01", "2027-03-31") and crm.period_range({"fy_start_month": "4"}, 2026, 0) == ("2026-04-01", "2027-03-31"))
+check("filters render", c.get("/commission?fy=2026&q=2&by=billed").status_code == 200 and c.get("/commission?fy=zz&q=9").status_code == 200)
+# validation
+def bad(**kw): return c.post("/commission/new", data=dict(bill, _csrf=t, **kw), follow_redirects=True).data
+check("collected > billed rejected", b"cannot be more than the billed" in bad(collected_amount="2000000"))
+check("collected needs a date", b"Enter the collected date" in bad(collected_date=""))
+check("collected date before billed rejected", b"before the billed date" in bad(collected_date="2026-04-01"))
+check("billed amount required", b"Billed amount is required" in bad(billed_amount=""))
+check("pct above 100 rejected", b"between 0 and 100" in bad(commission_pct="101"))
+check("non-client rejected", b"converted client" in bad(record_id=str(crm.connect().execute("SELECT id FROM records WHERE type='prospect' LIMIT 1").fetchone()[0])))
+check("nothing extra stored by rejected posts", crm.connect().execute("SELECT COUNT(*) FROM billings").fetchone()[0] == 2)
+# edit / delete
+bid = crm.connect().execute("SELECT id FROM billings WHERE invoice_ref='INV-1'").fetchone()[0]
+check("edit form prefilled", b"INV-1" in c.get(f"/commission/{bid}/edit").data)
+t2 = token(path=f"/commission/{bid}/edit")
+r = c.post(f"/commission/{bid}/edit", data=dict(bill, _csrf=t2, collected_amount="1000000"), follow_redirects=True)
+check("edit saves full collection", b"Billing updated" in r.data and crm.connect().execute("SELECT collected_amount FROM billings WHERE id=?", (bid,)).fetchone()[0] == 1000000)
+# split settings
+t3 = token(path="/commission")
+r = c.post("/commission/settings", data={"_csrf": t3, "split_sales": "60", "split_presales": "30", "split_mgmt": "20", "default_pct": "5"}, follow_redirects=True)
+check("split must total 100", b"must add up to 100" in r.data and crm.commission_split(crm.get_settings(crm.connect())) == (50.0, 30.0, 20.0))
+r = c.post("/commission/settings", data={"_csrf": t3, "split_sales": "40", "split_presales": "40", "split_mgmt": "20", "default_pct": "3"}, follow_redirects=True)
+check("split saved", b"Commission split saved" in r.data and crm.commission_split(crm.get_settings(crm.connect())) == (40.0, 40.0, 20.0))
+check("default pct prefilled", b'value="3"' in c.get("/commission/new").data)
+r = c.get("/commission/export.xlsx"); ws = load_workbook(io.BytesIO(r.data))["Commission"]
+check("export workbook", r.status_code == 200 and ws.max_row == 3 and "Sales 40%" in [x.value for x in ws[1]], ws.max_row)
+check("non-admin cannot post commission", sc.post("/commission/settings", data={"_csrf": token(sc, "/records"), "split_sales": "1", "split_presales": "1", "split_mgmt": "98"}).status_code in (302, 403)
+      and crm.commission_split(crm.get_settings(crm.connect())) == (40.0, 40.0, 20.0))
+# deleting the client removes its billing lines
+t4 = token(path="/commission")
+c.post(f"/commission/{bid}/delete", data={"_csrf": t4})
+check("billing line delete", crm.connect().execute("SELECT COUNT(*) FROM billings WHERE id=?", (bid,)).fetchone()[0] == 0)
+c.post(f"/records/{cid}/delete", data={"_csrf": token(path=f"/records/{cid}/edit")})
+check("deleting a client deletes its billing", crm.connect().execute("SELECT COUNT(*) FROM billings WHERE record_id=?", (cid,)).fetchone()[0] == 0)
+check("commission audit trail", crm.connect().execute("SELECT COUNT(*) FROM audit_log WHERE action LIKE 'billing_%' OR action='commission_settings'").fetchone()[0] >= 5)
+
 print("backend:", "PostgreSQL" if crm.USE_PG else "SQLite")
 print("\nFAILED:" if fails else "\nALL PASSED", fails)

@@ -84,6 +84,10 @@ SETTING_DEFAULTS = {
     "reminder_last_attempt": "",
     "reminder_last_sent": "",
     "reminder_status": "",
+    "commission_split_sales": "50",      # % of the commission pool: sales / management / presales (sum = 100)
+    "commission_split_presales": "30",
+    "commission_split_mgmt": "20",
+    "commission_default_pct": "5",       # pre-filled commission % on a new billing line
 }
 
 DEFAULT_PRODUCTS = ["mPower Wealth", "mPower Asset Management", "Pension admin", "RTA"]
@@ -136,6 +140,19 @@ def schema_statements():
             value_inr {real}, value_usd {real},
             updated_at TEXT NOT NULL)""",
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_targets_key ON targets (lower(rep), fy, quarter)",
+        f"""CREATE TABLE IF NOT EXISTS billings (
+            id {pk},
+            record_id INTEGER NOT NULL,
+            invoice_ref TEXT,
+            currency TEXT NOT NULL DEFAULT 'INR',
+            billed_amount {real} NOT NULL,
+            billed_date TEXT,
+            collected_amount {real} NOT NULL DEFAULT 0,
+            collected_date TEXT,
+            commission_pct {real} NOT NULL DEFAULT 0,
+            notes TEXT,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""",
+        "CREATE INDEX IF NOT EXISTS idx_billings_record ON billings (record_id)",
         f"""CREATE TABLE IF NOT EXISTS audit_log (
             id {pk},
             ts TEXT NOT NULL, username TEXT, action TEXT NOT NULL, detail TEXT)""",
@@ -360,7 +377,7 @@ def migrate(conn):
 
 
 # Bump this whenever the schema / migrations / seed data change, so existing databases get upgraded once.
-SCHEMA_VERSION = "2026-11-20.2"
+SCHEMA_VERSION = "2026-11-24.1"
 
 
 def schema_is_current():
@@ -1851,6 +1868,7 @@ def record_delete(rid):
     rec = g.db.execute("SELECT type, company FROM records WHERE id=?", (rid,)).fetchone()
     if not rec:
         abort(404)
+    g.db.execute("DELETE FROM billings WHERE record_id=?", (rid,))
     g.db.execute("DELETE FROM records WHERE id=?", (rid,))
     audit(g.db, g.user["username"], "record_deleted", f"#{rid} {rec['company']}")
     g.db.commit()
@@ -2377,6 +2395,246 @@ def api_notifications():
                    overdue_url=url_for("records", type="prospect", due="overdue"),
                    upcoming_url=url_for("records", type="prospect", due="30"))
 
+
+# ---- commission (billed vs collected -> commission pool -> sales / presales / management split)
+def commission_split(cfg):
+    """(sales, presales, management) percentages, always summing to 100."""
+    try:
+        v = [float(cfg["commission_split_sales"]), float(cfg["commission_split_presales"]), float(cfg["commission_split_mgmt"])]
+        if all(x >= 0 for x in v) and abs(sum(v) - 100) < 0.01:
+            return tuple(v)
+    except (TypeError, ValueError):
+        pass
+    return (50.0, 30.0, 20.0)
+
+
+def commission_calc(billed, collected, pct, split):
+    """Commission is earned on the COLLECTED amount; the part still to be collected is shown as pending.
+    The management share takes the rounding remainder so the three shares always add up to the pool."""
+    due = round((collected or 0) * (pct or 0) / 100, 2)
+    sales = round(due * split[0] / 100, 2)
+    pre = round(due * split[1] / 100, 2)
+    return {"due": due, "sales": sales, "presales": pre, "mgmt": round(due - sales - pre, 2),
+            "pending": round(max((billed or 0) - (collected or 0), 0) * (pct or 0) / 100, 2),
+            "outstanding": round(max((billed or 0) - (collected or 0), 0), 2)}
+
+
+def money2(v, cur):
+    v = float(v or 0)
+    whole, frac = f"{abs(v):.2f}".split(".")
+    g_ = indian_group(int(whole)) if cur == "INR" else f"{int(whole):,}"
+    return ("-" if v < 0 else "") + ("₹" if cur == "INR" else "$") + g_ + ("" if frac == "00" else "." + frac)
+
+
+def period_range(cfg, fy, quarter):
+    """(start, end) ISO dates of a financial year / quarter, or (None, None) for all time."""
+    if not fy:
+        return None, None
+    fs = int(cfg["fy_start_month"])
+    q = quarter if quarter in (1, 2, 3, 4) else 0
+    m0 = fs + (3 * (q - 1) if q else 0)
+    m1 = m0 + (3 if q else 12)
+    a = date(fy + (m0 - 1) // 12, (m0 - 1) % 12 + 1, 1)
+    b = date(fy + (m1 - 1) // 12, (m1 - 1) % 12 + 1, 1)
+    return a.isoformat(), (b - timedelta(days=1)).isoformat()
+
+
+def commission_data(conn, cfg, fy, quarter, by):
+    split = commission_split(cfg)
+    col = "b.collected_date" if by == "collected" else "b.billed_date"
+    lo, hi = period_range(cfg, fy, quarter)
+    where, args = [], []
+    if lo:
+        where.append(f"{col} >= ? AND {col} <= ?"); args += [lo, hi]
+    rows = conn.execute(
+        "SELECT b.*, r.company, r.owner, r.presales_lead FROM billings b JOIN records r ON r.id = b.record_id "
+        + ("WHERE " + " AND ".join(where) if where else "") + " ORDER BY COALESCE(b.collected_date, b.billed_date) DESC, b.id DESC", args).fetchall()
+    lines = []
+    tot = {c: dict(billed=0.0, collected=0.0, outstanding=0.0, due=0.0, pending=0.0, sales=0.0, presales=0.0, mgmt=0.0) for c in ("INR", "USD")}
+    people = {}
+    for r in rows:
+        c = commission_calc(r["billed_amount"], r["collected_amount"], r["commission_pct"], split)
+        cur = r["currency"] if r["currency"] in tot else "INR"
+        d = dict(r); d.update(c); d["cur"] = cur; lines.append(d)
+        t = tot[cur]
+        t["billed"] += r["billed_amount"] or 0; t["collected"] += r["collected_amount"] or 0
+        for k in ("outstanding", "due", "pending", "sales", "presales", "mgmt"):
+            t[k] += c[k]
+        for role, name, amt in (("Sales", r["owner"], c["sales"]), ("Presales", r["presales_lead"], c["presales"])):
+            key = (role, (name or "").strip().lower(), cur)
+            p = people.setdefault(key, {"role": role, "name": (name or "").strip() or "(not assigned)", "cur": cur, "collected": 0.0, "share": 0.0, "n": 0})
+            p["collected"] += r["collected_amount"] or 0; p["share"] += amt; p["n"] += 1
+    ppl = sorted(people.values(), key=lambda p: (p["role"] != "Sales", p["cur"], -p["share"]))
+    return {"lines": lines, "tot": tot, "people": ppl, "split": split, "lo": lo, "hi": hi}
+
+
+def parse_billing_form(form):
+    """-> (clean dict, errors)"""
+    errs, d = [], {}
+    try:
+        d["record_id"] = int(form.get("record_id", ""))
+    except ValueError:
+        d["record_id"] = None; errs.append("Choose the client.")
+    d["currency"] = "USD" if form.get("currency") == "USD" else "INR"
+    d["invoice_ref"] = (form.get("invoice_ref") or "").strip()[:60] or None
+    d["notes"] = (form.get("notes") or "").strip()[:500] or None
+    try:
+        d["billed_amount"] = parse_money(form.get("billed_amount"))
+        if not d["billed_amount"]:
+            errs.append("Billed amount is required and must be above zero.")
+    except ValueError as e:
+        d["billed_amount"] = None; errs.append(f"Billed amount: {e}")
+    try:
+        d["collected_amount"] = parse_money(form.get("collected_amount")) or 0.0
+    except ValueError as e:
+        d["collected_amount"] = 0.0; errs.append(f"Collected amount: {e}")
+    for k, label in (("billed_date", "Billed date"), ("collected_date", "Collected date")):
+        try:
+            v = parse_date(form.get(k)); d[k] = v.isoformat() if v else None
+        except ValueError as e:
+            d[k] = None; errs.append(f"{label}: {e}")
+    try:
+        pct = parse_money(form.get("commission_pct"))
+        d["commission_pct"] = pct if pct is not None else 0.0
+        if d["commission_pct"] > 100:
+            errs.append("Commission % must be between 0 and 100.")
+    except ValueError as e:
+        d["commission_pct"] = 0.0; errs.append(f"Commission %: {e}")
+    if not d["billed_date"]:
+        errs.append("Billed date is required.")
+    if d["billed_amount"] and d["collected_amount"] > d["billed_amount"] + 0.005:
+        errs.append("Collected amount cannot be more than the billed amount.")
+    if d["collected_amount"] and not d["collected_date"]:
+        errs.append("Enter the collected date for the amount collected.")
+    if d["collected_date"] and not d["collected_amount"]:
+        errs.append("Enter the collected amount for that collected date (or clear the date).")
+    if d["billed_date"] and d["collected_date"] and d["collected_date"] < d["billed_date"]:
+        errs.append("Collected date cannot be before the billed date.")
+    return d, errs
+
+
+def commission_filter():
+    fy = request.args.get("fy", type=int)
+    if fy is None:
+        fy = 0                                   # default: all time
+    q = request.args.get("q", 0, type=int)
+    by = "billed" if request.args.get("by") == "billed" else "collected"
+    return fy, (q if q in (1, 2, 3, 4) else 0), by
+
+
+@app.route("/commission")
+@admin_required
+def commission():
+    fy, q, by = commission_filter()
+    d = commission_data(g.db, g.cfg, fy, q, by)
+    fs = int(g.cfg["fy_start_month"])
+    years = sorted({current_fy(g.cfg) - 1, current_fy(g.cfg), current_fy(g.cfg) + 1} |
+                   {fy_of(date.fromisoformat(r[0]), fs)[0] for r in g.db.execute(
+                       "SELECT billed_date FROM billings WHERE billed_date IS NOT NULL").fetchall() if r[0]} | ({fy} if fy else set()))
+    return render_template("commission.html", d=d, fy=fy, q=q, by=by, years=[{"y": y, "name": fy_name(y, fs)} for y in years],
+                           q_labels=quarter_labels(fy or current_fy(g.cfg), fs), money2=money2,
+                           default_pct=g.cfg["commission_default_pct"])
+
+
+@app.route("/commission/settings", methods=["POST"])
+@admin_required
+def commission_settings():
+    try:
+        v = [parse_money(request.form.get(k)) or 0.0 for k in ("split_sales", "split_presales", "split_mgmt")]
+        dp = parse_money(request.form.get("default_pct")) or 0.0
+    except ValueError as e:
+        flash(f"Commission settings not saved: {e}", "error"); return redirect(url_for("commission"))
+    if abs(sum(v) - 100) > 0.01:
+        flash(f"Commission settings not saved: the three shares add up to {sum(v):g}%, they must add up to 100%.", "error")
+    elif dp > 100:
+        flash("Commission settings not saved: default commission % cannot be above 100.", "error")
+    else:
+        for k, x in zip(("commission_split_sales", "commission_split_presales", "commission_split_mgmt"), v):
+            set_setting(g.db, k, _trim(x))
+        set_setting(g.db, "commission_default_pct", _trim(dp))
+        audit(g.db, g.user["username"], "commission_settings", f"sales {v[0]:g} / presales {v[1]:g} / management {v[2]:g}; default {dp:g}%")
+        g.db.commit()
+        flash("Commission split saved. It applies to all billing lines, past and future.", "ok")
+    return redirect(url_for("commission"))
+
+
+def billing_form_ctx(row, errors=None):
+    clients = g.db.execute("SELECT id, company, owner, presales_lead FROM records WHERE type='client' ORDER BY lower(company)").fetchall()
+    return dict(b=row, clients=clients, errors=errors or [], split=commission_split(g.cfg))
+
+
+@app.route("/commission/new", methods=["GET", "POST"])
+@admin_required
+def billing_new():
+    if request.method == "POST":
+        d, errs = parse_billing_form(request.form)
+        if d["record_id"] and not g.db.execute("SELECT 1 FROM records WHERE id=? AND type='client'", (d["record_id"],)).fetchone():
+            errs.append("Commission is entered against a converted client.")
+        if not errs:
+            now = iso(utcnow())
+            g.db.execute("INSERT INTO billings(record_id,invoice_ref,currency,billed_amount,billed_date,collected_amount,collected_date,"
+                         "commission_pct,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                         (d["record_id"], d["invoice_ref"], d["currency"], d["billed_amount"], d["billed_date"], d["collected_amount"],
+                          d["collected_date"], d["commission_pct"], d["notes"], now, now))
+            audit(g.db, g.user["username"], "billing_added", f"client #{d['record_id']} {d['currency']} billed {d['billed_amount']:g} collected {d['collected_amount']:g}")
+            g.db.commit()
+            flash("Billing saved.", "ok")
+            return redirect(url_for("commission"))
+        return render_template("billing_form.html", is_new=True, **billing_form_ctx(request.form, errs))
+    pre = {"record_id": request.args.get("record", ""), "commission_pct": g.cfg["commission_default_pct"], "currency": "INR"}
+    return render_template("billing_form.html", is_new=True, **billing_form_ctx(pre))
+
+
+@app.route("/commission/<int:bid>/edit", methods=["GET", "POST"])
+@admin_required
+def billing_edit(bid):
+    row = g.db.execute("SELECT * FROM billings WHERE id=?", (bid,)).fetchone()
+    if not row:
+        abort(404)
+    if request.method == "POST":
+        d, errs = parse_billing_form(request.form)
+        if not errs:
+            g.db.execute("UPDATE billings SET record_id=?, invoice_ref=?, currency=?, billed_amount=?, billed_date=?, collected_amount=?, "
+                         "collected_date=?, commission_pct=?, notes=?, updated_at=? WHERE id=?",
+                         (d["record_id"], d["invoice_ref"], d["currency"], d["billed_amount"], d["billed_date"], d["collected_amount"],
+                          d["collected_date"], d["commission_pct"], d["notes"], iso(utcnow()), bid))
+            audit(g.db, g.user["username"], "billing_updated", f"#{bid} client #{d['record_id']} collected {d['collected_amount']:g}")
+            g.db.commit()
+            flash("Billing updated.", "ok")
+            return redirect(url_for("commission"))
+        return render_template("billing_form.html", is_new=False, bid=bid, **billing_form_ctx(request.form, errs))
+    return render_template("billing_form.html", is_new=False, bid=bid, **billing_form_ctx(dict(row)))
+
+
+@app.route("/commission/<int:bid>/delete", methods=["POST"])
+@admin_required
+def billing_delete(bid):
+    if g.db.execute("SELECT 1 FROM billings WHERE id=?", (bid,)).fetchone():
+        g.db.execute("DELETE FROM billings WHERE id=?", (bid,))
+        audit(g.db, g.user["username"], "billing_deleted", f"#{bid}")
+        g.db.commit()
+        flash("Billing line deleted.", "ok")
+    return redirect(url_for("commission"))
+
+
+@app.route("/commission/export.xlsx")
+@admin_required
+def commission_export():
+    fy, q, by = commission_filter()
+    d = commission_data(g.db, g.cfg, fy, q, by)
+    sp = d["split"]
+    wb = Workbook(); ws = wb.active; ws.title = "Commission"
+    ws.append(["Client", "Invoice", "Currency", "Billed amount", "Billed date", "Collected amount", "Collected date", "Outstanding",
+               "Commission %", "Commission due (on collected)", f"Sales {sp[0]:g}%", f"Presales {sp[1]:g}%", f"Management {sp[2]:g}%",
+               "Commission pending (on outstanding)", "Sales owner", "Presales lead"])
+    for l in d["lines"]:
+        ws.append([l["company"], l["invoice_ref"], l["cur"], l["billed_amount"], l["billed_date"], l["collected_amount"], l["collected_date"],
+                   l["outstanding"], l["commission_pct"], l["due"], l["sales"], l["presales"], l["mgmt"], l["pending"], l["owner"], l["presales_lead"]])
+    style_header(ws, [28, 14, 9, 16, 13, 16, 14, 14, 12, 18, 14, 14, 16, 20, 20, 20])
+    bio = io.BytesIO(); wb.save(bio); bio.seek(0)
+    return send_file(bio, as_attachment=True, download_name="commission.xlsx",
+                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 # ---- global search
 SEARCH_COLS = ("company", "contact_name", "email", "owner", "presales_lead", "region", "product", "phone")
 
@@ -2590,6 +2848,7 @@ def danger_zone():
         else:
             kinds = DELETE_SCOPES[scope]
             n = sum(counts()["prospects" if k == "prospect" else "clients"] for k in kinds)
+            g.db.execute(f"DELETE FROM billings WHERE record_id IN (SELECT id FROM records WHERE type IN ({','.join('?' * len(kinds))}))", kinds)
             g.db.execute(f"DELETE FROM records WHERE type IN ({','.join('?' * len(kinds))})", kinds)
             audit(g.db, g.user["username"], "delete_data", f"scope={scope}: {n} record(s) deleted")
             g.db.commit()

@@ -380,3 +380,8 @@ table.tgt td, table.tgt th { padding: 10px 12px; }
 .bell-empty { padding: 16px 12px; font-size: 13px; color: var(--muted); }
 .gsearch { margin-left: auto; }
 @media (max-width: 760px) { .bell-pop { position: fixed; left: 16px; right: 16px; top: 60px; width: auto; } }
+
+/* ---- commission ---- */
+.calc { padding: 9px 12px; border: 1px dashed var(--line); border-radius: 10px; background: #fff8f8; font-weight: 600; min-height: 40px; font-size: 13.5px; }
+.kpi .s { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.cm-filter { gap: 8px; align-items: center; flex-wrap: wrap; } .cm-filter select { width: auto; min-width: 150px; } .cm-filter label { margin: 0; }

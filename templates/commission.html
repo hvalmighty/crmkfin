@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}Commission{% endblock %}
+{% block content %}
+<div class="cur-wrap" data-cur="inr">
+<div class="bar"><div class="grow"><h1>Commission</h1>
+  <p class="sub" style="margin:0">Commission is earned on the <strong>collected</strong> amount. The pool is split {{ '%g' % d.split[0] }}% sales · {{ '%g' % d.split[1] }}% presales · {{ '%g' % d.split[2] }}% management. Admin only.</p></div>
+  <div class="seg" role="group" aria-label="Currency"><button type="button" data-cur="inr">₹ INR</button><button type="button" data-cur="usd">$ USD</button></div>
+  <a class="btn alt" href="{{ url_for('commission_export', fy=fy, q=q, by=by) }}">Export Excel</a>
+  <a class="btn" href="{{ url_for('billing_new') }}">+ Add billing</a></div>
+
+<form method="get" class="bar cm-filter">
+  <label style="margin:0" for="f-by">Show by</label>
+  <select id="f-by" name="by" onchange="this.form.submit()"><option value="collected" {{ 'selected' if by == 'collected' }}>Collected date</option><option value="billed" {{ 'selected' if by == 'billed' }}>Billed date</option></select>
+  <select name="fy" aria-label="Financial year" onchange="this.form.submit()"><option value="0" {{ 'selected' if not fy }}>All time</option>{% for y in years %}<option value="{{ y.y }}" {{ 'selected' if y.y == fy }}>{{ y.name }}</option>{% endfor %}</select>
+  {% if fy %}<select name="q" aria-label="Period" onchange="this.form.submit()"><option value="0" {{ 'selected' if not q }}>Full year</option>{% for i in range(1, 5) %}<option value="{{ i }}" {{ 'selected' if q == i }}>Q{{ i }} · {{ q_labels[i-1] }}</option>{% endfor %}</select>{% endif %}
+</form>
+
+{% for cur, cls in (('INR', 'only-inr'), ('USD', 'only-usd')) %}
+{% set t = d.tot[cur] %}
+<div class="kpis grid {{ cls }}">
+  <div class="kpi"><div class="l">Billed</div><div class="n">{{ money2(t.billed, cur) }}</div></div>
+  <div class="kpi t-sky"><div class="l">Collected</div><div class="n">{{ money2(t.collected, cur) }}</div></div>
+  <div class="kpi"><div class="l">Outstanding</div><div class="n">{{ money2(t.outstanding, cur) }}</div></div>
+  <div class="kpi hero"><div class="l">Commission due</div><div class="n">{{ money2(t.due, cur) }}</div><div class="s">on collected amount</div></div>
+  <div class="kpi"><div class="l">Commission pending</div><div class="n">{{ money2(t.pending, cur) }}</div><div class="s">once outstanding is collected</div></div>
+</div>
+<div class="card flush {{ cls }}"><div class="scroll"><table>
+  <tr><th>Commission split</th><th class="r">Share</th><th class="r">Amount due</th></tr>
+  <tr><td>Sales (client owner)</td><td class="r">{{ '%g' % d.split[0] }}%</td><td class="r">{{ money2(t.sales, cur) }}</td></tr>
+  <tr><td>Presales (presales lead)</td><td class="r">{{ '%g' % d.split[1] }}%</td><td class="r">{{ money2(t.presales, cur) }}</td></tr>
+  <tr><td>Management</td><td class="r">{{ '%g' % d.split[2] }}%</td><td class="r">{{ money2(t.mgmt, cur) }}</td></tr>
+  <tr class="total"><td><strong>Total commission due</strong></td><td class="r">100%</td><td class="r"><strong>{{ money2(t.due, cur) }}</strong></td></tr>
+</table></div></div>
+{% endfor %}
+
+<div class="card flush"><div class="card-h" style="padding:14px 16px 0"><h2>By person</h2></div><div class="scroll"><table>
+  <tr><th>Role</th><th>Name</th><th class="r">Collected on their deals</th><th class="r">Commission share</th></tr>
+  {% for p in d.people %}
+  <tr class="{{ 'only-inr' if p.cur == 'INR' else 'only-usd' }}"><td>{{ p.role }}</td><td><strong>{{ p.name }}</strong></td><td class="r">{{ money2(p.collected, p.cur) }}</td><td class="r"><strong>{{ money2(p.share, p.cur) }}</strong></td></tr>
+  {% else %}<tr><td colspan="4" class="empty">Nothing in this period yet.</td></tr>{% endfor %}
+</table></div></div>
+
+<div class="card flush"><div class="card-h" style="padding:14px 16px 0"><h2>Billing lines</h2></div><div class="scroll"><table>
+  <tr><th>Client</th><th>Invoice</th><th class="r">Billed</th><th class="r">Collected</th><th class="r">Outstanding</th><th class="r">%</th><th class="r">Commission due</th><th></th></tr>
+  {% for l in d.lines %}
+  <tr class="{{ 'only-inr' if l.cur == 'INR' else 'only-usd' }}">
+    <td><strong>{{ l.company }}</strong><br><span class="muted">{{ l.owner or '–' }}{% if l.presales_lead %} · {{ l.presales_lead }}{% endif %}</span></td>
+    <td>{{ l.invoice_ref or '' }}</td>
+    <td class="r">{{ money2(l.billed_amount, l.cur) }}<br><span class="muted">{{ l.billed_date|fdate }}</span></td>
+    <td class="r">{{ money2(l.collected_amount, l.cur) }}<br><span class="muted">{{ l.collected_date|fdate if l.collected_date else '–' }}</span></td>
+    <td class="r">{{ money2(l.outstanding, l.cur) }}</td><td class="r">{{ '%g' % l.commission_pct }}%</td>
+    <td class="r"><strong>{{ money2(l.due, l.cur) }}</strong><br><span class="muted">S {{ money2(l.sales, l.cur) }} · P {{ money2(l.presales, l.cur) }} · M {{ money2(l.mgmt, l.cur) }}</span></td>
+    <td><a class="btn alt sm" href="{{ url_for('billing_edit', bid=l.id) }}">Edit</a></td>
+  </tr>
+  {% else %}<tr><td colspan="8" class="empty">No billing lines for this period. <a href="{{ url_for('billing_new') }}">Add the first one</a>.</td></tr>{% endfor %}
+</table></div></div>
+</div>
+
+<form method="post" action="{{ url_for('commission_settings') }}" class="card" style="max-width:720px">
+  <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+  <h2>Commission split</h2>
+  <p class="muted" style="margin-top:0">How the commission pool is shared. The three shares must add up to 100%. A change applies to all billing lines, including past ones.</p>
+  <div class="form-grid" id="split-form">
+    <div><label for="split_sales">Sales %</label><input id="split_sales" name="split_sales" type="text" inputmode="decimal" value="{{ '%g' % d.split[0] }}"></div>
+    <div><label for="split_presales">Presales %</label><input id="split_presales" name="split_presales" type="text" inputmode="decimal" value="{{ '%g' % d.split[1] }}"></div>
+    <div><label for="split_mgmt">Management %</label><input id="split_mgmt" name="split_mgmt" type="text" inputmode="decimal" value="{{ '%g' % d.split[2] }}"></div>
+    <div><label for="default_pct">Default commission % on a new line</label><input id="default_pct" name="default_pct" type="text" inputmode="decimal" value="{{ default_pct }}"></div>
+  </div>
+  <div class="bar" style="margin:14px 0 0"><button type="submit">Save split</button><span class="muted" id="split-sum"></span></div>
+</form>
+{% endblock %}

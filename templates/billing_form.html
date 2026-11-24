@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}{{ 'Add billing' if is_new else 'Edit billing' }}{% endblock %}
+{% block content %}
+<h1>{{ 'Add billing & collection' if is_new else 'Edit billing & collection' }}</h1>
+<p class="sub">Commission is earned on the <strong>collected</strong> amount: collected × commission %, split {{ '%g' % split[0] }}% sales · {{ '%g' % split[1] }}% presales · {{ '%g' % split[2] }}% management.</p>
+{% for e in errors %}<div class="flash error">{{ e }}</div>{% endfor %}
+<form method="post" class="card" id="bill-form" data-sales="{{ split[0] }}" data-pre="{{ split[1] }}" data-mgmt="{{ split[2] }}">
+  <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+  <div class="form-grid">
+    <div class="span2"><label for="record_id">Client (deal won) *</label>
+      <select id="record_id" name="record_id" required>
+        <option value="">– select a client –</option>
+        {% for c in clients %}<option value="{{ c.id }}" {{ 'selected' if b.record_id | string == c.id | string }}>{{ c.company }}{% if c.owner %} · {{ c.owner }}{% endif %}</option>{% endfor %}
+      </select>
+      {% if not clients %}<div class="hint">There are no clients yet - convert a prospect or add a client first.</div>{% endif %}</div>
+    <div><label for="invoice_ref">Invoice / reference</label>
+      <input id="invoice_ref" name="invoice_ref" type="text" maxlength="60" value="{{ b.invoice_ref or '' }}" placeholder="optional"></div>
+    <div><label for="currency">Currency</label>
+      <select id="currency" name="currency"><option value="INR" {{ 'selected' if b.currency != 'USD' }}>INR ₹</option><option value="USD" {{ 'selected' if b.currency == 'USD' }}>USD $</option></select></div>
+    <div><label for="billed_amount">Billed amount *</label>
+      <input id="billed_amount" name="billed_amount" type="text" inputmode="decimal" required value="{{ b.billed_amount if b.billed_amount is not none else '' }}"></div>
+    <div><label for="billed_date">Billed date *</label>
+      <input id="billed_date" name="billed_date" type="date" required value="{{ b.billed_date or '' }}"></div>
+    <div><label for="collected_amount">Collected amount</label>
+      <input id="collected_amount" name="collected_amount" type="text" inputmode="decimal" value="{{ b.collected_amount if b.collected_amount not in (none, 0, 0.0, '0') else '' }}"></div>
+    <div><label for="collected_date">Collected date</label>
+      <input id="collected_date" name="collected_date" type="date" value="{{ b.collected_date or '' }}"></div>
+    <div><label for="commission_pct">Commission % (of the amount)</label>
+      <input id="commission_pct" name="commission_pct" type="text" inputmode="decimal" value="{{ b.commission_pct if b.commission_pct is not none else '' }}"></div>
+    <div><label>Commission due now</label>
+      <div class="calc" id="calc" aria-live="polite">–</div></div>
+    <div class="span2"><label for="notes">Notes</label>
+      <textarea id="notes" name="notes" maxlength="500">{{ b.notes or '' }}</textarea></div>
+  </div>
+  <div class="bar" style="margin:18px 0 0">
+    <button type="submit">Save</button>
+    <a class="btn alt" href="{{ url_for('commission') }}">Cancel</a>
+  </div>
+</form>
+{% if not is_new %}
+<form method="post" action="{{ url_for('billing_delete', bid=bid) }}" data-confirm="Delete this billing line?">
+  <input type="hidden" name="_csrf" value="{{ csrf_token() }}"><button class="danger sm" type="submit">Delete this line</button>
+</form>
+{% endif %}
+{% endblock %}
