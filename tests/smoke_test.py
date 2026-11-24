@@ -746,5 +746,62 @@ c.post(f"/records/{cid}/delete", data={"_csrf": token(path=f"/records/{cid}/edit
 check("deleting a client deletes its billing", crm.connect().execute("SELECT COUNT(*) FROM billings WHERE record_id=?", (cid,)).fetchone()[0] == 0)
 check("commission audit trail", crm.connect().execute("SELECT COUNT(*) FROM audit_log WHERE action LIKE 'billing_%' OR action='commission_settings'").fetchone()[0] >= 5)
 
+# 25. commission bulk import / export
+rec(type="client", company="Bulk One", owner="Asha", closed_date="2026-05-01", value="1")
+rec(type="client", company="Bulk Two", owner="Ravi", closed_date="2026-05-01", value="1")
+rec(type="client", company="Dup Co", owner="Ravi", closed_date="2026-05-01", value="1")
+rec(type="client", company="dup co", owner="Ravi", closed_date="2026-05-01", value="1")
+r = c.get("/commission/template.xlsx"); wbt = load_workbook(io.BytesIO(r.data))
+check("commission template", r.status_code == 200 and wbt.sheetnames[:2] == ["Commission", "Clients"] and wbt["Commission"]["A1"].value == "Client*")
+check("template lists clients", "Bulk One" in [x[0].value for x in wbt["Clients"].iter_rows(min_row=2)])
+def bxl(rows, name="Commission", heads=None):
+    wb = Workbook(); ws = wb.active; ws.title = name
+    ws.append(heads or ["Client*", "Invoice", "Currency", "Billed Amount*", "Billed Date*", "Collected Amount", "Collected Date", "Commission %", "Notes"])
+    for x in rows: ws.append(x)
+    bio = io.BytesIO(); wb.save(bio); bio.seek(0); return bio
+def bimp(bio, dry=False):
+    d = {"_csrf": token(path="/data"), "file": (bio, "c.xlsx")}
+    if dry: d["dry_run"] = "1"
+    return c.post("/commission/import", data=d, content_type="multipart/form-data", follow_redirects=True)
+import datetime as _dt
+rows = [["Bulk One", "B-1", "INR", 1000000, _dt.datetime(2026, 5, 1), 400000, _dt.datetime(2026, 6, 10), 5, "x"],
+        ["bulk two", "", "USD", "12,000", "15-07-2026", "12000", "30-07-2026", None, ""],
+        ["Nobody Ltd", "B-3", "INR", 100, "01-05-2026", None, None, 5, ""],
+        ["Dup Co", "B-4", "INR", 100, "01-05-2026", None, None, 5, ""],
+        ["Bulk One", "B-5", "EUR", 100, "01-05-2026", None, None, 5, ""],
+        ["Bulk One", "B-6", "INR", 100, "01-05-2026", 500, None, 5, ""],
+        ["Bulk One", "B-7", "INR", 100, "", None, None, 5, ""]]
+n0 = crm.connect().execute("SELECT COUNT(*) FROM billings").fetchone()[0]
+r = bimp(bxl(rows), dry=True)
+check("dry run saves nothing", b"Dry run" in r.data and crm.connect().execute("SELECT COUNT(*) FROM billings").fetchone()[0] == n0, r.data[:300])
+r = bimp(bxl(rows))
+check("import counts", b"<strong>2</strong> added" in r.data and b"<strong>5</strong> row problem" in r.data, re.sub(rb"<[^>]+>", b" ", r.data)[-700:])
+check("import explains problems", b"not a client" in r.data and b"More than one client" in r.data and b"INR or USD" in r.data and b"collected date" in r.data.lower() and b"Billed date is required" in r.data)
+b1 = crm.connect().execute("SELECT * FROM billings WHERE invoice_ref='B-1'").fetchone()
+check("imported values", b1 and b1["billed_amount"] == 1000000 and b1["collected_amount"] == 400000 and b1["collected_date"] == "2026-06-10" and b1["commission_pct"] == 5)
+b2 = crm.connect().execute("SELECT * FROM billings WHERE currency='USD' AND billed_amount=12000").fetchone()
+check("blank pct uses default, USD, case-insensitive client", b2 and b2["commission_pct"] == 3 and b2["collected_amount"] == 12000, dict(b2) if b2 else None)
+r = bimp(bxl([["Bulk One", "B-1", "INR", 1000000, "01-05-2026", 700000, "20-07-2026", 5, "second part"], ["Bulk Two", "", "USD", 12000, "15-07-2026", 12000, "30-07-2026", 4, ""]]))
+check("re-upload updates, never duplicates", b"<strong>0</strong> added" in r.data and b"<strong>2</strong> updated" in r.data)
+check("update applied", crm.connect().execute("SELECT collected_amount FROM billings WHERE invoice_ref='B-1'").fetchone()[0] == 700000
+      and crm.connect().execute("SELECT commission_pct FROM billings WHERE currency='USD' AND billed_amount=12000").fetchone()[0] == 4)
+wbp = Workbook(); wsp = wbp.active; wsp.title = "Commission"; wsp.append(["Client", "Billed", "Billed date", "Commission"])
+wsp.append(["Bulk One", 1000, "01-08-2026", 0.025]); wsp["D2"].number_format = "0.0%"
+bio = io.BytesIO(); wbp.save(bio); bio.seek(0); bimp(bio)
+check("header aliases + percent-formatted cell", crm.connect().execute("SELECT commission_pct FROM billings WHERE billed_amount=1000 AND billed_date='2026-08-01'").fetchone()[0] == 2.5)
+r = bimp(bxl([["x"]], heads=["Foo", "Bar"])); check("missing headers explained", b"Header row is missing" in r.data)
+r = c.post("/commission/import", data={"_csrf": token(path="/data"), "file": (io.BytesIO(b"junk"), "c.xlsx")}, content_type="multipart/form-data", follow_redirects=True)
+check("junk file handled", b"Could not read" in r.data)
+# export -> import round trip creates nothing new
+ex = c.get("/commission/export.xlsx").data
+cnt = crm.connect().execute("SELECT COUNT(*) FROM billings").fetchone()[0]
+r = bimp(io.BytesIO(ex)); check("export re-imports cleanly", b"<strong>0</strong> added" in r.data and b"<strong>0</strong> row problem" in r.data and crm.connect().execute("SELECT COUNT(*) FROM billings").fetchone()[0] == cnt, re.sub(rb"<[^>]+>", b" ", r.data)[-500:])
+check("import card on Import/Export page (admin)", b"Import commission" in c.get("/data").data and b"Import commission" not in sc.get("/data").data)
+for pth in ("/commission/template.xlsx",):
+    check("commission template blocked for non-admin", sc.get(pth).status_code in (302, 403))
+_r = sc.post("/commission/import", data={"_csrf": token(sc, "/records"), "file": (bxl(rows[:1]), "c.xlsx")}, content_type="multipart/form-data")
+check("commission import blocked for non-admin", _r.status_code in (302, 403) and crm.connect().execute("SELECT COUNT(*) FROM billings").fetchone()[0] == cnt)
+check("import audit-logged", crm.connect().execute("SELECT COUNT(*) FROM audit_log WHERE action='billing_import'").fetchone()[0] >= 3)
+
 print("backend:", "PostgreSQL" if crm.USE_PG else "SQLite")
 print("\nFAILED:" if fails else "\nALL PASSED", fails)

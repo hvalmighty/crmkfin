@@ -5,6 +5,7 @@
 <div class="bar"><div class="grow"><h1>Commission</h1>
   <p class="sub" style="margin:0">Commission is earned on the <strong>collected</strong> amount. The pool is split {{ '%g' % d.split[0] }}% sales · {{ '%g' % d.split[1] }}% presales · {{ '%g' % d.split[2] }}% management. Admin only.</p></div>
   <div class="seg" role="group" aria-label="Currency"><button type="button" data-cur="inr">₹ INR</button><button type="button" data-cur="usd">$ USD</button></div>
+  <a class="btn alt" href="{{ url_for('data_page') }}#commission-import">Import</a>
   <a class="btn alt" href="{{ url_for('commission_export', fy=fy, q=q, by=by) }}">Export Excel</a>
   <a class="btn" href="{{ url_for('billing_new') }}">+ Add billing</a></div>
 

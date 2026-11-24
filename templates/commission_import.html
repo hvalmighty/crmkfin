@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Commission import{% endblock %}
+{% block content %}
+<h1>{{ 'Dry run - nothing was saved' if r.dry else 'Commission import complete' }}</h1>
+<div class="card">
+  <p><strong>{{ r.created }}</strong> {{ 'would be ' if r.dry }}added · <strong>{{ r.updated }}</strong> {{ 'would be ' if r.dry }}updated · <strong>{{ r.errors | length }}</strong> row problem(s)</p>
+  {% if r.errors %}
+  <h2 style="margin-top:16px">Rows that need fixing</h2>
+  <div class="scroll"><table><tr><th>Row</th><th>Problem</th></tr>
+    {% for row, msg in r.errors[:200] %}<tr><td>{{ row }}</td><td>{{ msg }}</td></tr>{% endfor %}
+  </table></div>
+  {% if r.errors | length > 200 %}<p class="muted">Showing the first 200.</p>{% endif %}
+  <p class="muted">Good rows are imported even if others have problems. Fix the listed rows and upload again - lines already imported are matched and updated, not duplicated.</p>
+  {% endif %}
+  <div class="bar" style="margin:16px 0 0"><a class="btn" href="{{ url_for('commission') }}">Open Commission</a><a class="btn alt" href="{{ url_for('data_page') }}">Back to Import / Export</a></div>
+</div>
+{% endblock %}

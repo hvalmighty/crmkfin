@@ -2624,16 +2624,165 @@ def commission_export():
     d = commission_data(g.db, g.cfg, fy, q, by)
     sp = d["split"]
     wb = Workbook(); ws = wb.active; ws.title = "Commission"
-    ws.append(["Client", "Invoice", "Currency", "Billed amount", "Billed date", "Collected amount", "Collected date", "Outstanding",
-               "Commission %", "Commission due (on collected)", f"Sales {sp[0]:g}%", f"Presales {sp[1]:g}%", f"Management {sp[2]:g}%",
-               "Commission pending (on outstanding)", "Sales owner", "Presales lead"])
+    ws.append(BILLING_HEADERS + ["Outstanding", f"Sales {sp[0]:g}%", f"Presales {sp[1]:g}%", f"Management {sp[2]:g}%",
+                                 "Commission due (on collected)", "Commission pending (on outstanding)", "Sales owner", "Presales lead"])
     for l in d["lines"]:
         ws.append([l["company"], l["invoice_ref"], l["cur"], l["billed_amount"], l["billed_date"], l["collected_amount"], l["collected_date"],
-                   l["outstanding"], l["commission_pct"], l["due"], l["sales"], l["presales"], l["mgmt"], l["pending"], l["owner"], l["presales_lead"]])
-    style_header(ws, [28, 14, 9, 16, 13, 16, 14, 14, 12, 18, 14, 14, 16, 20, 20, 20])
+                   l["commission_pct"], l["notes"], l["outstanding"], l["sales"], l["presales"], l["mgmt"], l["due"], l["pending"],
+                   l["owner"], l["presales_lead"]])
+    style_header(ws, [28, 14, 9, 16, 13, 16, 14, 12, 24, 14, 14, 14, 16, 18, 20, 20, 20])
     bio = io.BytesIO(); wb.save(bio); bio.seek(0)
     return send_file(bio, as_attachment=True, download_name="commission.xlsx",
                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+# ---- commission bulk import / template
+BILLING_HEADERS = ["Client*", "Invoice", "Currency", "Billed Amount*", "Billed Date*", "Collected Amount", "Collected Date", "Commission %", "Notes"]
+BILLING_ALIASES = {
+    "client": "client", "clientname": "client", "company": "client", "customer": "client",
+    "invoice": "invoice", "invoiceno": "invoice", "invoicenumber": "invoice", "invoiceref": "invoice", "reference": "invoice", "ref": "invoice",
+    "currency": "currency", "ccy": "currency",
+    "billedamount": "billed", "billed": "billed", "billedamt": "billed", "invoiceamount": "billed", "billamount": "billed",
+    "billeddate": "billed_date", "invoicedate": "billed_date", "billdate": "billed_date",
+    "collectedamount": "collected", "collected": "collected", "received": "collected", "receivedamount": "collected", "amountcollected": "collected",
+    "collecteddate": "collected_date", "receiveddate": "collected_date", "collectiondate": "collected_date",
+    "commission": "pct", "commissionpct": "pct", "commissionpercent": "pct", "commissionrate": "pct", "rate": "pct", "pct": "pct",
+    "notes": "notes", "note": "notes", "remarks": "notes",
+}
+
+
+def import_billings(conn, stream, default_pct, dry):
+    wb = load_workbook(stream, read_only=True, data_only=True)
+    ws = wb["Commission"] if "Commission" in wb.sheetnames else wb.worksheets[0]
+    res = {"created": 0, "updated": 0, "errors": [], "rows": 0, "dry": dry}
+    clients = {}
+    for r in conn.execute("SELECT id, company FROM records WHERE type='client'"):
+        clients.setdefault((r["company"] or "").strip().lower(), []).append(r["id"])
+    existing = {}
+    for r in conn.execute("SELECT id, record_id, invoice_ref, currency, billed_amount, billed_date FROM billings"):
+        if r["invoice_ref"]:
+            existing[(r["record_id"], "inv", r["invoice_ref"].strip().lower())] = r["id"]
+        existing[(r["record_id"], "amt", r["currency"], r["billed_date"], round(r["billed_amount"] or 0, 2))] = r["id"]
+    colmap, seen_rows = None, 0
+    now = iso(utcnow())
+    for n, cells in enumerate(ws.iter_rows(), start=1):
+        row = [getattr(c, "value", None) for c in cells]
+        if colmap is None:
+            if all(v in (None, "") for v in row):
+                continue
+            colmap = {}
+            for i, h in enumerate(row):
+                k = BILLING_ALIASES.get(re.sub(r"[^a-z]", "", str(h or "").lower().replace("%", "pct")))
+                if k and k not in colmap:
+                    colmap[k] = i
+            missing = [x for x in ("client", "billed", "billed_date") if x not in colmap]
+            if missing:
+                res["errors"].append((n, "Header row is missing: " + ", ".join({"client": "Client", "billed": "Billed Amount", "billed_date": "Billed Date"}[m] for m in missing)))
+                return res
+            continue
+        if all(v in (None, "") for v in row):
+            continue
+        seen_rows += 1
+        if seen_rows > 5000:
+            res["errors"].append((n, "Only the first 5,000 rows are read - split the file.")); break
+        get = lambda k: (row[colmap[k]] if k in colmap and colmap[k] < len(row) else None)
+        name = str(get("client") or "").strip()
+        ids = clients.get(name.lower(), [])
+        if not name:
+            res["errors"].append((n, "Client is missing")); continue
+        if not ids:
+            res["errors"].append((n, f"'{name}' is not a client - add or convert it first, and check the spelling")); continue
+        if len(ids) > 1:
+            res["errors"].append((n, f"More than one client is called '{name}' - rename one so it is unique")); continue
+        cur_raw = str(get("currency") or "").strip().lower()
+        if cur_raw in ("", "inr", "rs", "rs.", "\u20b9", "rupee", "rupees"):
+            cur = "INR"
+        elif cur_raw in ("usd", "$", "us$", "dollar", "dollars"):
+            cur = "USD"
+        else:
+            res["errors"].append((n, f"Currency must be INR or USD (got '{get('currency')}')")); continue
+        pct = get("pct")
+        if isinstance(pct, (int, float)) and "pct" in colmap and colmap["pct"] < len(cells) \
+                and "%" in str(getattr(cells[colmap["pct"]], "number_format", "")):
+            pct = round(pct * 100, 4)                  # a cell formatted as a percentage holds 0.05 for 5%
+        form = {"record_id": str(ids[0]), "invoice_ref": get("invoice"), "currency": cur, "billed_amount": get("billed"),
+                "billed_date": get("billed_date"), "collected_amount": get("collected"), "collected_date": get("collected_date"),
+                "commission_pct": default_pct if pct in (None, "") else pct, "notes": get("notes")}
+        form = {k: (v if isinstance(v, (datetime, date)) or v is None else str(v) if k != "commission_pct" else v) for k, v in form.items()}
+        d, errs = parse_billing_form(form)
+        if errs:
+            res["errors"].append((n, "; ".join(errs))); continue
+        res["rows"] += 1
+        key = (d["record_id"], "inv", d["invoice_ref"].lower()) if d["invoice_ref"] else None
+        akey = (d["record_id"], "amt", d["currency"], d["billed_date"], round(d["billed_amount"], 2))
+        bid = existing.get(key) if key else None
+        bid = bid or existing.get(akey)
+        vals = (d["invoice_ref"], d["currency"], d["billed_amount"], d["billed_date"], d["collected_amount"], d["collected_date"], d["commission_pct"], d["notes"])
+        if bid:
+            conn.execute("UPDATE billings SET invoice_ref=?, currency=?, billed_amount=?, billed_date=?, collected_amount=?, collected_date=?, "
+                         "commission_pct=?, notes=?, updated_at=? WHERE id=?", vals + (now, bid))
+            res["updated"] += 1
+        else:
+            cur_ = conn.execute("INSERT INTO billings(invoice_ref,currency,billed_amount,billed_date,collected_amount,collected_date,commission_pct,notes,"
+                                "record_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) RETURNING id", vals + (d["record_id"], now, now))
+            bid = cur_.fetchone()[0]
+            res["created"] += 1
+        if key:
+            existing[key] = bid
+        existing[akey] = bid
+    return res
+
+
+@app.route("/commission/template.xlsx")
+@admin_required
+def billing_template():
+    wb = Workbook(); ws = wb.active; ws.title = "Commission"
+    ws.append(BILLING_HEADERS)
+    ex = g.db.execute("SELECT company FROM records WHERE type='client' ORDER BY lower(company) LIMIT 2").fetchall()
+    c1 = ex[0]["company"] if ex else "Example Client Ltd"
+    ws.append([c1, "INV-1001", "INR", 1000000, "01-05-2026", 400000, "10-06-2026", g.cfg["commission_default_pct"], "first instalment"])
+    ws.append([c1, "INV-1002", "INR", 500000, "01-07-2026", None, None, g.cfg["commission_default_pct"], "not collected yet"])
+    ws.append([ex[1]["company"] if len(ex) > 1 else "Another Client", "", "USD", 12000, "15-07-2026", 12000, "30-07-2026", g.cfg["commission_default_pct"], ""])
+    style_header(ws, [30, 14, 10, 16, 14, 17, 15, 14, 28])
+    w2 = wb.create_sheet("Clients")
+    w2.append(["Client names you can use (exactly as written)", "Sales owner", "Presales lead"])
+    for r in g.db.execute("SELECT company, owner, presales_lead FROM records WHERE type='client' ORDER BY lower(company)"):
+        w2.append([r["company"], r["owner"], r["presales_lead"]])
+    w2.column_dimensions["A"].width = 46; w2.column_dimensions["B"].width = 22; w2.column_dimensions["C"].width = 22
+    w3 = wb.create_sheet("Read me")
+    for line in ("One row per invoice / collection. Fill only the first sheet; columns marked * are required.",
+                 "Client must match a client already in the system (see the Clients sheet). Currency: INR (default) or USD.",
+                 "Dates as DD-MM-YYYY. Collected Amount and Collected Date go together; leave both empty if nothing is collected yet.",
+                 "Commission % is the rate applied to the COLLECTED amount; leave it empty to use the default (" + str(g.cfg["commission_default_pct"]) + "%).",
+                 "Re-uploading updates existing lines (matched on Client + Invoice, or Client + billed date + amount when there is no invoice), so you can upload collections as they come in.",
+                 "Use 'Dry run' on the upload screen to check the file without saving."):
+        w3.append([line])
+    w3.column_dimensions["A"].width = 150
+    bio = io.BytesIO(); wb.save(bio); bio.seek(0)
+    return send_file(bio, as_attachment=True, download_name="commission_template.xlsx",
+                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+@app.route("/commission/import", methods=["POST"])
+@admin_required
+def billing_import():
+    f = request.files.get("file")
+    if not f or not f.filename.lower().endswith(".xlsx"):
+        flash("Choose an Excel (.xlsx) file.", "error")
+        return redirect(url_for("data_page"))
+    dry = request.form.get("dry_run") == "1"
+    try:
+        res = import_billings(g.db, f.stream, g.cfg["commission_default_pct"], dry)
+    except Exception as exc:
+        g.db.rollback(); log.warning("billing import failed: %s", exc)
+        flash("Could not read that file - is it a valid .xlsx workbook?", "error")
+        return redirect(url_for("data_page"))
+    if dry:
+        g.db.rollback()
+    else:
+        audit(g.db, g.user["username"], "billing_import", f"{f.filename[:60]}: {res['created']} added, {res['updated']} updated, {len(res['errors'])} problem(s)")
+        g.db.commit()
+    return render_template("commission_import.html", r=res)
 
 # ---- global search
 SEARCH_COLS = ("company", "contact_name", "email", "owner", "presales_lead", "region", "product", "phone")

@@ -48,4 +48,27 @@
       Clients need a Closed Date or a Closed Quarter (e.g. 2026-Q3).</p>
   </div>
 </div>
+
+{% if g.user.role == 'admin' %}
+<div class="grid two" id="commission-import" style="margin-top:20px">
+  <div class="card">
+    <h2>3 · Import commission (billed &amp; collected)</h2>
+    <form method="post" action="{{ url_for('billing_import') }}" enctype="multipart/form-data">
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <p><input type="file" name="file" accept=".xlsx" required></p>
+      <p class="check"><input type="checkbox" id="bdry" name="dry_run" value="1">
+        <label for="bdry" style="margin:0;font-weight:500">Dry run – check the file without saving</label></p>
+      <button type="submit">Upload commission file</button>
+    </form>
+    <p class="hint" style="margin-top:12px">One row per invoice: Client, Invoice, Currency, Billed Amount &amp; Date, Collected Amount &amp; Date, Commission %.
+      Re-uploading updates the same invoice, so collections can be added later. Admin only.</p>
+  </div>
+  <div class="card">
+    <h2>4 · Commission templates &amp; downloads</h2>
+    <p><a class="btn alt" href="{{ url_for('billing_template') }}">Download commission template</a></p>
+    <p><a class="btn alt" href="{{ url_for('commission_export') }}">Export all commission lines</a></p>
+    <p class="hint">The template lists your client names on a second sheet. The export can be edited and uploaded back.</p>
+  </div>
+</div>
+{% endif %}
 {% endblock %}
