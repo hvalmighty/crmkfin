@@ -143,6 +143,8 @@ IRIS is a read-only assistant in the floating button at the bottom-right of ever
 - Put the **Vercel function region** and the **database region** in the same place (Vercel → Settings → Functions → Region; the database region is in the host name of `DATABASE_URL`, e.g. `…ap-southeast-1.aws.neon.tech`). Every page makes a few database round-trips, so distance matters most.
 - Use the database's **pooled** connection string. Free databases (e.g. Neon) go to sleep when idle; the first request after a pause is slow while it wakes up (the app retries automatically).
 - **Admin → Speed check** measures the real round-trip time from the app to the database and says whether the regions match. Each page's `Server-Timing` header (browser Network tab) shows its server time and number of database calls.
+- A pooled database connection that has been idle for more than 20 s is replaced by a fresh one (a frozen serverless function usually has a dead socket, and querying it can hang for many seconds); connections also use TCP keep-alives with a 10 s user timeout.
+- `Server-Timing` now reads `init` (first-request setup), `conn` (getting a database connection), `app` (total) and the query count. Requests slower than 2.5 s are logged as `slow request …` in the Vercel function logs with the same breakdown.
 - Plain page views run in autocommit mode (no BEGIN/ROLLBACK round trips), which saves two database round trips per page.
 - After changing the schema, bump `SCHEMA_VERSION` in `app.py` so existing databases are upgraded once; otherwise a cold start is a single query.
 

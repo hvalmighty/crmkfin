@@ -848,5 +848,14 @@ r = bimp(io.BytesIO(ex)); check("round trip keeps split", b"<strong>0</strong> r
 c.post(f"/commission/{pid}/delete", data={"_csrf": token(path="/commission")})
 check("deleting a line deletes its split rows", crm.connect().execute("SELECT COUNT(*) FROM billing_presales WHERE billing_id=?", (pid,)).fetchone()[0] == 0)
 
+# 27. idle pooled PostgreSQL connection is replaced instead of pinged; timing header has the breakdown
+check("Server-Timing breakdown", all(k in c.get("/records?type=client").headers.get("Server-Timing", "") for k in ("init;dur=", "conn;dur=", "app;dur=")))
+if crm.USE_PG:
+    _a = crm.connect(reuse=True); _old = crm._tls.conn
+    crm._tls.used = crm.time.time() - 3600
+    _b = crm.connect(reuse=True)
+    check("idle connection replaced with a fresh one", crm._tls.conn is not _old and _old.closed and _b.execute("SELECT 1").fetchone()[0] == 1)
+    check("fresh connection reused while warm", crm.connect(reuse=True).conn is crm._tls.conn)
+
 print("backend:", "PostgreSQL" if crm.USE_PG else "SQLite")
 print("\nFAILED:" if fails else "\nALL PASSED", fails)

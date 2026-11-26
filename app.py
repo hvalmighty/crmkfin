@@ -287,7 +287,10 @@ def _new_pg():
             time.sleep(delay)
         try:
             # prepare_threshold=None: works behind pgbouncer / Neon's pooled connection string.
-            return psycopg.connect(DATABASE_URL, row_factory=_pg_row_factory, prepare_threshold=None, connect_timeout=10)
+            # keepalives + tcp_user_timeout: a socket that died while the serverless function was frozen fails in seconds
+            # instead of hanging for minutes.
+            return psycopg.connect(DATABASE_URL, row_factory=_pg_row_factory, prepare_threshold=None, connect_timeout=8,
+                                   keepalives=1, keepalives_idle=10, keepalives_interval=3, keepalives_count=3, tcp_user_timeout=10000)
         except psycopg.OperationalError as e:
             last = e
     raise last
@@ -302,11 +305,13 @@ def connect(reuse=False, autocommit=False):
         c = getattr(_tls, "conn", None)
         if c is not None and not c.closed:
             if time.time() - getattr(_tls, "used", 0) > IDLE_PING_SECONDS:
-                try:                      # connection may have been dropped while the instance was idle
-                    c.execute("SELECT 1")
-                    c.rollback()
+                # A serverless function is frozen between requests, so the database (or a NAT in between) has usually dropped
+                # the socket silently. Querying such a socket can hang for a very long time; opening a fresh one costs ~20 ms.
+                try:
+                    c.close()
                 except Exception:
-                    c = None
+                    pass
+                c = None
         else:
             c = None
         if c is None:
@@ -1570,8 +1575,10 @@ def before():
             abort(400)
     g.t0 = time.perf_counter(); g.nq = 0
     ensure_init()
+    g.t_init = time.perf_counter()
     # Plain page views run in autocommit mode on PostgreSQL: no BEGIN / ROLLBACK round trips to a remote database.
     g.db = connect(reuse=True, autocommit=request.method in ("GET", "HEAD"))
+    g.t_conn = time.perf_counter()
     g.cfg = cached_settings(g.db)
     g.user = None
     uid = session.get("uid")
@@ -1602,7 +1609,13 @@ def secure_headers(resp):
         resp.headers["Cache-Control"] = "no-store"
         t0 = getattr(g, "t0", None)
         if t0 is not None:        # visible in the browser's Network tab -> Timing; shows server time and DB round trips
-            resp.headers["Server-Timing"] = f'app;dur={(time.perf_counter() - t0) * 1000:.0f}, db;desc="{getattr(g, "nq", 0)} queries"' 
+            now = time.perf_counter(); ti, tc = getattr(g, "t_init", t0), getattr(g, "t_conn", t0)
+            total = (now - t0) * 1000
+            resp.headers["Server-Timing"] = (f'init;dur={(ti - t0) * 1000:.0f}, conn;dur={(tc - ti) * 1000:.0f}, '
+                                             f'app;dur={total:.0f}, db;desc="{getattr(g, "nq", 0)} queries"')
+            if total > 2500:          # shows up in the Vercel function logs: where the time went
+                log.warning("slow request %s %s: %.0f ms (init %.0f, connect %.0f, %d queries)", request.method, request.full_path,
+                            total, (ti - t0) * 1000, (tc - ti) * 1000, getattr(g, "nq", 0))
     if app.config["SESSION_COOKIE_SECURE"]:
         resp.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return resp
