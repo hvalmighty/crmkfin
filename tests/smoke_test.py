@@ -857,5 +857,18 @@ if crm.USE_PG:
     check("idle connection replaced with a fresh one", crm._tls.conn is not _old and _old.closed and _b.execute("SELECT 1").fetchone()[0] == 1)
     check("fresh connection reused while warm", crm.connect(reuse=True).conn is crm._tls.conn)
 
+# 28. quarter labels (Q2-FY27)
+check("fq label April start", crm.fq_label("2026-07-15", 4) == "Q2-FY27" and crm.fq_label("2027-03-31", 4) == "Q4-FY27" and crm.fq_label("2026-04-01", 4) == "Q1-FY27")
+check("fq label calendar year", crm.fq_label("2026-02-01", 1) == "Q1-FY26" and crm.fq_label("2026-11-01", 1) == "Q4-FY26")
+check("fq label Jan-Mar belongs to the year ending", crm.fq_label("2026-01-10", 4) == "Q4-FY26" and crm.fq_label("", 4) == "")
+dq = crm.commission_data(crm.connect(), crm.get_settings(crm.connect()), 0, 0, "collected")
+check("quarter-wise summary", dq["quarters"] and all(x["label"].startswith("Q") and "-FY" in x["label"] for x in dq["quarters"]), dq["quarters"][:2])
+q1 = [x for x in dq["quarters"] if x["label"] == "Q1-FY27" and x["cur"] == "INR"]
+check("quarter total adds collections", q1 and q1[0]["collected"] > 0 and abs(q1[0]["due"] - (q1[0]["sales"] + q1[0]["presales"] + q1[0]["mgmt"])) < 0.02, q1)
+pg = c.get("/commission").data
+check("commission page shows quarter tags", b"Collected in" in pg and b"Quarter-wise collections" in pg and b"Q1-FY27" in pg)
+wsq = load_workbook(io.BytesIO(c.get("/commission/export.xlsx").data))["Commission"]
+check("export has quarter columns", [x.value for x in wsq[1]][-2:] == ["Billed quarter", "Collected quarter"] and any(str(x.value).startswith("Q1-FY27") for x in wsq["T"]))
+
 print("backend:", "PostgreSQL" if crm.USE_PG else "SQLite")
 print("\nFAILED:" if fails else "\nALL PASSED", fails)

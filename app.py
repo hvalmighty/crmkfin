@@ -2510,6 +2510,23 @@ def save_presales(conn, bid, shares):
         conn.execute("INSERT INTO billing_presales(billing_id, person, share_pct) VALUES(?,?,?)", (bid, nm, pc))
 
 
+
+def fq_label(iso_date, fy_start):
+    """'Q2-FY27' for a date: quarter within the financial year + the year the financial year ENDS in (Apr 2026 - Mar 2027 = FY27)."""
+    if not iso_date:
+        return ""
+    try:
+        d = date.fromisoformat(str(iso_date)[:10])
+    except ValueError:
+        return ""
+    y, q = fy_of(d, fy_start)
+    return f"Q{q}-FY{str(y + (1 if fy_start != 1 else 0))[-2:]}"
+
+
+def fq_key(iso_date, fy_start):
+    d = date.fromisoformat(str(iso_date)[:10]); return fy_of(d, fy_start)
+
+
 def money2(v, cur):
     v = float(v or 0)
     whole, frac = f"{abs(v):.2f}".split(".")
@@ -2542,6 +2559,7 @@ def commission_data(conn, cfg, fy, quarter, by):
         + ("WHERE " + " AND ".join(where) if where else "") + " ORDER BY COALESCE(b.collected_date, b.billed_date) DESC, b.id DESC", args).fetchall()
     lines = []
     all_ps = load_presales(conn)
+    fs_ = int(cfg["fy_start_month"]); qtr = {}
     tot = {c: dict(billed=0.0, collected=0.0, outstanding=0.0, due=0.0, pending=0.0, sales=0.0, presales=0.0, mgmt=0.0) for c in ("INR", "USD")}
     people = {}
     for r in rows:
@@ -2550,8 +2568,15 @@ def commission_data(conn, cfg, fy, quarter, by):
         d = dict(r); d.update(c); d["cur"] = cur
         explicit = all_ps.get(r["id"])
         shares = explicit or [((r["presales_lead"] or "").strip() or "(not assigned)", 100.0)]
+        d["cq"] = fq_label(r["collected_date"], fs_); d["bq"] = fq_label(r["billed_date"], fs_)
         d["ps_shares"] = allocate(c["presales"], shares); d["ps_explicit"] = bool(explicit); d["ps_split"] = explicit or []
         lines.append(d)
+        if r["collected_date"] and (r["collected_amount"] or 0) > 0:      # quarter-wise view: by the quarter the money was collected
+            qk = (fq_key(r["collected_date"], fs_), d["cq"], cur)
+            qq = qtr.setdefault(qk, {"label": d["cq"], "cur": cur, "key": qk[0], "collected": 0.0, "due": 0.0, "sales": 0.0, "presales": 0.0, "mgmt": 0.0, "n": 0})
+            qq["collected"] += r["collected_amount"]; qq["n"] += 1
+            for k in ("due", "sales", "presales", "mgmt"):
+                qq[k] += c[k]
         t = tot[cur]
         t["billed"] += r["billed_amount"] or 0; t["collected"] += r["collected_amount"] or 0
         for k in ("outstanding", "due", "pending", "sales", "presales", "mgmt"):
@@ -2562,7 +2587,8 @@ def commission_data(conn, cfg, fy, quarter, by):
             p = people.setdefault(key, {"role": role, "name": (name or "").strip() or "(not assigned)", "cur": cur, "collected": 0.0, "share": 0.0, "n": 0})
             p["collected"] += (r["collected_amount"] or 0) * pct / 100; p["share"] += amt; p["n"] += 1
     ppl = sorted(people.values(), key=lambda p: (p["role"] != "Sales", p["cur"], -p["share"]))
-    return {"lines": lines, "tot": tot, "people": ppl, "split": split, "lo": lo, "hi": hi}
+    quarters = sorted(qtr.values(), key=lambda x: (x["key"], x["cur"]))
+    return {"lines": lines, "tot": tot, "people": ppl, "quarters": quarters, "split": split, "lo": lo, "hi": hi}
 
 
 def parse_billing_form(form):
@@ -2736,12 +2762,12 @@ def commission_export():
     sp = d["split"]
     wb = Workbook(); ws = wb.active; ws.title = "Commission"
     ws.append(BILLING_HEADERS + ["Outstanding", f"Sales {sp[0]:g}%", f"Presales {sp[1]:g}%", f"Management {sp[2]:g}%",
-                                 "Commission due (on collected)", "Commission pending (on outstanding)", "Sales owner", "Presales lead"])
+                                 "Commission due (on collected)", "Commission pending (on outstanding)", "Sales owner", "Presales lead", "Billed quarter", "Collected quarter"])
     for l in d["lines"]:
         ws.append([l["company"], l["invoice_ref"], l["cur"], l["billed_amount"], l["billed_date"], l["collected_amount"], l["collected_date"],
                    l["commission_pct"], l["notes"], split_text(l["ps_split"]), l["outstanding"], l["sales"], l["presales"], l["mgmt"], l["due"], l["pending"],
-                   l["owner"], l["presales_lead"]])
-    style_header(ws, [28, 14, 9, 16, 13, 16, 14, 12, 24, 26, 14, 14, 14, 16, 18, 20, 20, 20])
+                   l["owner"], l["presales_lead"], l["bq"], l["cq"]])
+    style_header(ws, [28, 14, 9, 16, 13, 16, 14, 12, 24, 26, 14, 14, 14, 16, 18, 20, 20, 20, 14, 16])
     bio = io.BytesIO(); wb.save(bio); bio.seek(0)
     return send_file(bio, as_attachment=True, download_name="commission.xlsx",
                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")

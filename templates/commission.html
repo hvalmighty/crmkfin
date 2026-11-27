@@ -34,6 +34,14 @@
 </table></div></div>
 {% endfor %}
 
+<div class="card flush"><div class="card-h" style="padding:14px 16px 0"><h2>Quarter-wise collections</h2><p class="muted" style="margin:2px 0 0">By the financial quarter the money was collected, e.g. Q2-FY27 = Jul-Sep 2026 when the year starts in April.</p></div><div class="scroll"><table>
+  <tr><th>Quarter</th><th class="r">Collected</th><th class="r">Commission due</th><th class="r">Sales</th><th class="r">Presales</th><th class="r">Management</th></tr>
+  {% for x in d.quarters %}
+  <tr class="{{ 'only-inr' if x.cur == 'INR' else 'only-usd' }}"><td><span class="qtag">{{ x.label }}</span></td><td class="r">{{ money2(x.collected, x.cur) }}</td><td class="r"><strong>{{ money2(x.due, x.cur) }}</strong></td>
+    <td class="r">{{ money2(x.sales, x.cur) }}</td><td class="r">{{ money2(x.presales, x.cur) }}</td><td class="r">{{ money2(x.mgmt, x.cur) }}</td></tr>
+  {% else %}<tr><td colspan="6" class="empty">No collections in this period yet.</td></tr>{% endfor %}
+</table></div></div>
+
 <div class="card flush"><div class="card-h" style="padding:14px 16px 0"><h2>By person</h2></div><div class="scroll"><table>
   <tr><th>Role</th><th>Name</th><th class="r">Collected on their deals</th><th class="r">Commission share</th></tr>
   {% for p in d.people %}
@@ -42,19 +50,20 @@
 </table></div></div>
 
 <div class="card flush"><div class="card-h" style="padding:14px 16px 0"><h2>Billing lines</h2></div><div class="scroll"><table>
-  <tr><th>Client</th><th>Invoice</th><th class="r">Billed</th><th class="r">Collected</th><th class="r">Outstanding</th><th class="r">%</th><th class="r">Commission due</th><th></th></tr>
+  <tr><th>Client</th><th>Invoice</th><th class="r">Billed</th><th class="r">Collected</th><th>Collected in</th><th class="r">Outstanding</th><th class="r">%</th><th class="r">Commission due</th><th></th></tr>
   {% for l in d.lines %}
   <tr class="{{ 'only-inr' if l.cur == 'INR' else 'only-usd' }}">
     <td><strong>{{ l.company }}</strong><br><span class="muted">{{ l.owner or '–' }}{% if l.presales_lead %} · {{ l.presales_lead }}{% endif %}</span></td>
     <td>{{ l.invoice_ref or '' }}</td>
-    <td class="r">{{ money2(l.billed_amount, l.cur) }}<br><span class="muted">{{ l.billed_date|fdate }}</span></td>
+    <td class="r">{{ money2(l.billed_amount, l.cur) }}<br><span class="muted">{{ l.billed_date|fdate }} · {{ l.bq }}</span></td>
     <td class="r">{{ money2(l.collected_amount, l.cur) }}<br><span class="muted">{{ l.collected_date|fdate if l.collected_date else '–' }}</span></td>
+    <td>{% if l.cq and l.collected_amount %}<span class="qtag">{{ l.cq }}</span>{% else %}<span class="muted">–</span>{% endif %}</td>
     <td class="r">{{ money2(l.outstanding, l.cur) }}</td><td class="r">{{ '%g' % l.commission_pct }}%</td>
     <td class="r"><strong>{{ money2(l.due, l.cur) }}</strong><br><span class="muted">S {{ money2(l.sales, l.cur) }} · P {{ money2(l.presales, l.cur) }} · M {{ money2(l.mgmt, l.cur) }}</span>
       {% if l.ps_shares | length > 1 %}<br><span class="muted">Presales: {% for n, a in l.ps_shares %}{{ n }} {{ money2(a, l.cur) }}{{ ' · ' if not loop.last }}{% endfor %}</span>{% endif %}</td>
     <td><a class="btn alt sm" href="{{ url_for('billing_edit', bid=l.id) }}">Edit</a></td>
   </tr>
-  {% else %}<tr><td colspan="8" class="empty">No billing lines for this period. <a href="{{ url_for('billing_new') }}">Add the first one</a>.</td></tr>{% endfor %}
+  {% else %}<tr><td colspan="9" class="empty">No billing lines for this period. <a href="{{ url_for('billing_new') }}">Add the first one</a>.</td></tr>{% endfor %}
 </table></div></div>
 </div>
 
